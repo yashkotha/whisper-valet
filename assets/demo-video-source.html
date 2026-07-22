@@ -66,7 +66,7 @@ const N = {
   loudnorm: { x: 1320, y: 1060, w: 660, h: 300, title: 'Lift quiet speaker', tool: 'loudnorm', amber: false },
   whisper:  { x: 2340, y: 330,  w: 780, h: 540, title: 'Transcribe', tool: 'macwhisper',    amber: false },
   pyannote: { x: 2280, y: 1160, w: 860, h: 440, title: 'Label speakers', tool: 'pyannote',  amber: true  },
-  preview:  { x: 2460, y: 1880, w: 840, h: 880, title: 'transcript.txt', tool: 'preview',   amber: false },
+  preview:  { x: 2460, y: 1880, w: 840, h: 1060, title: 'transcript.txt', tool: 'preview',   amber: false },
 };
 // stage schedule (node executes t0..t1)
 const SCHED = {
@@ -113,9 +113,9 @@ const CAM = [
   { t: 8.2,  cx: 2730, cy: 600,  z: 2.35 },   // whisper params
   { t: 9.9,  cx: 2710, cy: 1380, z: 2.45 },   // pyannote labels land
   { t: 11.6, cx: 2760, cy: 1700, z: 1.95 },   // follow the transcript wire down
-  { t: 13.6, cx: 2880, cy: 2260, z: 2.05 },   // preview fills
-  { t: 17.5, cx: 2880, cy: 2320, z: 2.20 },
-  { t: 20.0, cx: 2880, cy: 2330, z: 2.25 },
+  { t: 13.6, cx: 2880, cy: 2360, z: 2.00 },   // preview fills
+  { t: 17.5, cx: 2880, cy: 2420, z: 2.12 },
+  { t: 20.0, cx: 2880, cy: 2430, z: 2.16 },
 ];
 function camera(s) {
   let i = 0;
