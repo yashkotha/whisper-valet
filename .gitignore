@@ -1,0 +1,19 @@
+# local machine state — never committed
+config.env
+logs/
+.venv-demucs/
+.venv-pyannote/
+.venv-mcp/
+.venv/
+
+# python
+__pycache__/
+*.pyc
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+.ruff_cache/
+
+# macOS
+.DS_Store
