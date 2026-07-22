@@ -1,6 +1,6 @@
 # Whisper Valet
 
-![Whisper Valet: noise resolving into speaker-labeled speech](assets/launch-card.png)
+![Whisper Valet: results folder and speaker-labeled transcript](assets/launch-card.png)
 
 **The backstage crew for [MacWhisper](https://goodsnooze.gumroad.com/l/macwhisper).**
 Hand the valet a rough recording — noisy room, one speaker mumbling into their
