@@ -1,0 +1,444 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  * { margin: 0; padding: 0; }
+  html, body { background: #0A0A0C; overflow: hidden; }
+  canvas { display: block; }
+</style>
+</head>
+<body>
+<canvas id="c" width="3840" height="2160"></canvas>
+<script>
+// ============================================================
+// Whisper Valet — UI demo. The real product flow as a stylized
+// macOS interface: drop -> notify -> pipeline -> results -> transcript.
+// 19s @ 60fps = 1140 frames, 4K, deterministic.
+// House feel: ease-out-cubic in, ease-in out, no bounce, gold scarce.
+// ============================================================
+const W = 3840, H = 2160;
+const ctx = document.getElementById('c').getContext('2d');
+const FPS = 60, DUR = 19;
+window.TOTAL = FPS * DUR;
+
+// ---- easing ----
+const eoc = t => 1 - Math.pow(1 - t, 3);          // ease-out-cubic (entrances)
+const eic = t => t * t * t;                        // ease-in-cubic (exits)
+const eio = t => t < .5 ? 4*t*t*t : 1 - Math.pow(-2*t+2, 3)/2;
+const cl = v => Math.max(0, Math.min(1, v));
+// progress of a window [a,b] in seconds
+const seg = (s, a, b) => cl((s - a) / (b - a));
+
+// ---- palette ----
+const BG='#0A0A0C', GOLD='#C9A96A', GOLD_T='#D4B77E', LIGHT='#D9DAE0';
+const TXT='#F0F0F3', SUB='#9A9AA3', DIM='#6E6E78', FAINT='#4A4A52';
+
+// ---- fonts ----
+const SANS = '-apple-system, "SF Pro Display", "Helvetica Neue", sans-serif';
+const MONO = '"SF Mono", Menlo, monospace';
+const F = (w, s, mono) => `${w} ${s}px ${mono ? MONO : SANS}`;
+
+// ---- prng ----
+function mulberry(seed){return function(){seed|=0;seed=(seed+0x6D2B79F5)|0;let z=Math.imul(seed^(seed>>>15),1|seed);z=(z+Math.imul(z^(z>>>7),61|z))^z;return((z^(z>>>14))>>>0)/4294967296;};}
+
+// ---- shape helpers ----
+function rr(x, y, w, h, r) {
+  ctx.beginPath();
+  ctx.moveTo(x+r, y);
+  ctx.arcTo(x+w, y, x+w, y+h, r); ctx.arcTo(x+w, y+h, x, y+h, r);
+  ctx.arcTo(x, y+h, x, y, r); ctx.arcTo(x, y, x+w, y, r);
+  ctx.closePath();
+}
+function glassPanel(x, y, w, h, r, alpha) {
+  ctx.save();
+  ctx.globalAlpha = alpha;
+  ctx.shadowColor = 'rgba(0,0,0,0.55)'; ctx.shadowBlur = 90; ctx.shadowOffsetY = 30;
+  ctx.fillStyle = '#141419'; rr(x, y, w, h, r); ctx.fill();
+  ctx.shadowColor = 'transparent';
+  ctx.fillStyle = 'rgba(255,255,255,0.035)'; rr(x, y, w, h, r); ctx.fill();
+  ctx.strokeStyle = 'rgba(255,255,255,0.10)'; ctx.lineWidth = 1.5;
+  rr(x+0.75, y+0.75, w-1.5, h-1.5, r); ctx.stroke();
+  ctx.restore();
+}
+function trafficLights(x, y, alpha) {
+  const cols = ['#FF5F57', '#FEBC2E', '#28C840'];
+  ctx.save(); ctx.globalAlpha = alpha * 0.9;
+  cols.forEach((c, i) => { ctx.fillStyle = c; ctx.beginPath(); ctx.arc(x + i*44, y, 12, 0, 7); ctx.fill(); });
+  ctx.restore();
+}
+function audioIcon(x, y, s, color, alpha) {   // little waveform glyph
+  ctx.save(); ctx.globalAlpha = alpha; ctx.fillStyle = color;
+  const hs = [0.45, 0.8, 0.6, 1.0, 0.5, 0.75, 0.4];
+  hs.forEach((h, i) => { const bh = s * h; rr(x + i*s*0.22, y + (s-bh)/2, s*0.13, bh, s*0.06); ctx.fill(); });
+  ctx.restore();
+}
+function docIcon(x, y, s, color, alpha) {     // document glyph with fold
+  ctx.save(); ctx.globalAlpha = alpha;
+  ctx.strokeStyle = color; ctx.lineWidth = s * 0.09;
+  const w = s * 0.78, h = s, f = s * 0.26;
+  ctx.beginPath();
+  ctx.moveTo(x + w - f, y); ctx.lineTo(x + s*0.06 + 0, y); // top (short, leaves fold)
+  ctx.moveTo(x, y + s*0.0);
+  rr(x, y, w, h, s*0.10);
+  ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(x + w - f, y); ctx.lineTo(x + w - f, y + f); ctx.lineTo(x + w, y + f);
+  ctx.stroke();
+  ctx.restore();
+}
+function spinner(cx, cy, r, timeS, alpha) {
+  ctx.save(); ctx.globalAlpha = alpha;
+  ctx.strokeStyle = SUB; ctx.lineWidth = 5; ctx.lineCap = 'round';
+  const a0 = (timeS * 4.2) % (Math.PI * 2);
+  ctx.beginPath(); ctx.arc(cx, cy, r, a0, a0 + Math.PI * 1.4); ctx.stroke();
+  ctx.restore();
+}
+function check(cx, cy, s, prog, alpha) {
+  if (prog <= 0) return;
+  ctx.save(); ctx.globalAlpha = alpha;
+  ctx.strokeStyle = GOLD; ctx.lineWidth = 6; ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+  const p1 = {x: cx - s*0.5, y: cy + s*0.05}, p2 = {x: cx - s*0.12, y: cy + s*0.42}, p3 = {x: cx + s*0.55, y: cy - s*0.38};
+  ctx.beginPath(); ctx.moveTo(p1.x, p1.y);
+  const t = eoc(prog);
+  if (t < 0.45) { const k = t/0.45; ctx.lineTo(p1.x + (p2.x-p1.x)*k, p1.y + (p2.y-p1.y)*k); }
+  else { ctx.lineTo(p2.x, p2.y); const k = (t-0.45)/0.55; ctx.lineTo(p2.x + (p3.x-p2.x)*k, p2.y + (p3.y-p2.y)*k); }
+  ctx.stroke();
+  ctx.restore();
+}
+function cursor(x, y, alpha) {   // macOS arrow
+  ctx.save(); ctx.globalAlpha = alpha;
+  ctx.fillStyle = '#FFFFFF'; ctx.strokeStyle = 'rgba(0,0,0,0.6)'; ctx.lineWidth = 3;
+  ctx.beginPath();
+  ctx.moveTo(x, y); ctx.lineTo(x, y + 54); ctx.lineTo(x + 12, y + 42);
+  ctx.lineTo(x + 20, y + 60); ctx.lineTo(x + 29, y + 56); ctx.lineTo(x + 21, y + 38);
+  ctx.lineTo(x + 38, y + 38); ctx.closePath();
+  ctx.fill(); ctx.stroke();
+  ctx.restore();
+}
+function chipLabel(label, cx, cy, gold, alpha, scale) {
+  if (alpha <= 0) return;
+  ctx.save(); ctx.globalAlpha = alpha;
+  ctx.font = F(500, 26 * scale, true);
+  const pad = 24 * scale, tw = ctx.measureText(label).width + label.length * 3 * scale;
+  const w = tw + pad*2, h = 54 * scale, x = cx - w/2, y = cy - h/2;
+  ctx.fillStyle = gold ? 'rgba(201,169,106,0.10)' : 'rgba(255,255,255,0.06)';
+  rr(x, y, w, h, h/2); ctx.fill();
+  ctx.strokeStyle = gold ? 'rgba(201,169,106,0.36)' : 'rgba(255,255,255,0.12)';
+  ctx.lineWidth = 1.5; rr(x, y, w, h, h/2); ctx.stroke();
+  ctx.fillStyle = gold ? GOLD_T : '#B9B9C2';
+  ctx.textBaseline = 'middle';
+  let lx = x + pad;
+  for (const ch of label) { ctx.fillText(ch, lx, cy + 1); lx += ctx.measureText(ch).width + 3 * scale; }
+  ctx.restore();
+}
+
+// ---- layout ----
+const WIN = { x: 560, y: 420, w: 1660, h: 1330, r: 26 };
+const TWIN = { x: 2000, y: 560, w: 1420, h: 1250, r: 26 };  // transcript window
+
+// stage rows
+const STAGES = [
+  { name: 'Extract audio',      tool: 'ffmpeg',     t0: 3.2, t1: 4.4 },
+  { name: 'Isolate voices',     tool: 'demucs',     t0: 4.4, t1: 6.6 },
+  { name: 'Lift quiet speaker', tool: 'loudnorm',   t0: 6.6, t1: 7.4 },
+  { name: 'Transcribe',         tool: 'macwhisper', t0: 7.4, t1: 9.0 },
+  { name: 'Label speakers',     tool: 'pyannote',   t0: 9.0, t1: 10.4 },
+];
+
+// results rows
+const FILES = [
+  ['interview.mp3',                 '4.2 MB', 'audio'],
+  ['interview.cleaned.mp3',         '4.4 MB', 'audio'],
+  ['interview.cleaned_aggressive.mp3','4.4 MB','audio'],
+  ['transcript.txt',                '2 KB',   'doc'],
+  ['transcript.srt',                '3 KB',   'doc'],
+  ['transcript.json',               '18 KB',  'doc'],
+  ['report.txt',                    '1 KB',   'doc'],
+];
+
+// transcript lines
+const LINES = [
+  ['0:00', 'SPEAKER 1', true,  'So tell me how this project started.'],
+  ['0:06', 'SPEAKER 2', false, 'It began as a side experiment last spring.'],
+  ['0:14', 'SPEAKER 1', true,  'And what convinced you it was real?'],
+  ['0:19', 'SPEAKER 2', false, 'The first prototype. It just worked.'],
+  ['0:27', 'SPEAKER 1', true,  'Walk me through what happened next.'],
+];
+
+// mini waveform in processing panel (deterministic dots)
+const MINI = { relx: 120, w: WIN.w - 240, y: WIN.y + 1120, hmax: 60 };
+const mcols = [];
+{
+  const N = 120;
+  for (let i = 0; i < N; i++) {
+    const rnd = mulberry(5000 + i * 271);
+    const t = i / (N - 1);
+    const env = 0.35 + 0.65 * Math.abs(Math.sin(t*9.1)*0.55 + Math.sin(t*23.7)*0.3 + Math.sin(t*3.3)*0.35);
+    mcols.push({ t, env, dots: Array.from({length: 6}, () => ({ dy: (rnd()*2-1)*46*env, op: 0.15+rnd()*0.45, sz: 3+rnd()*3 })) });
+  }
+}
+const MTURNS = [[0.03,0.24,1],[0.28,0.42,0],[0.46,0.72,1],[0.76,0.88,0],[0.90,1.0,1]];
+function mturn(t){ for (const [a,b,sp] of MTURNS) if (t>=a&&t<=b) return sp; return -1; }
+
+// notification helper
+function notification(s, a, b, title, body) {
+  const tin = eoc(seg(s, a, a + 0.45));
+  const tout = 1 - eic(seg(s, b - 0.35, b));
+  const al = Math.min(tin, tout);
+  if (al <= 0) return;
+  const w = 760, h = 150;
+  const x = W - 80 - w + (1 - tin) * (w + 120), y = 100;
+  ctx.save(); ctx.globalAlpha = al;
+  glassPanel(x, y, w, h, 24, 1);
+  // app badge: gold rounded square with a W
+  ctx.fillStyle = 'rgba(201,169,106,0.16)'; rr(x + 28, y + 33, 84, 84, 20); ctx.fill();
+  ctx.strokeStyle = 'rgba(201,169,106,0.4)'; ctx.lineWidth = 1.5; rr(x + 28, y + 33, 84, 84, 20); ctx.stroke();
+  ctx.fillStyle = GOLD_T; ctx.font = F(650, 44); ctx.textBaseline = 'middle';
+  ctx.fillText('W', x + 52, y + 78);
+  ctx.fillStyle = TXT; ctx.font = F(600, 34);
+  ctx.fillText(title, x + 140, y + 58);
+  ctx.fillStyle = SUB; ctx.font = F(400, 30);
+  ctx.fillText(body, x + 140, y + 104);
+  ctx.restore();
+}
+
+// ============================================================
+window.renderFrame = function(frame) {
+  const s = frame / FPS;             // seconds
+  ctx.globalAlpha = 1;
+  ctx.fillStyle = BG; ctx.fillRect(0, 0, W, H);
+  // vignette
+  const vg = ctx.createRadialGradient(W/2, H/2, 400, W/2, H/2, 2300);
+  vg.addColorStop(0, 'rgba(255,255,255,0.016)');
+  vg.addColorStop(1, 'rgba(0,0,0,0.28)');
+  ctx.fillStyle = vg; ctx.fillRect(0, 0, W, H);
+
+  // main window x: centered until the transcript window needs room, then glides left
+  const wx = 1090 + (560 - 1090) * eio(seg(s, 12.6, 13.2));
+  // ------- main window (enters 0-0.7s) -------
+  const winIn = eoc(seg(s, 0.1, 0.7));
+  const wy = WIN.y + (1 - winIn) * 40;
+  glassPanel(wx, wy, WIN.w, WIN.h, WIN.r, winIn);
+  trafficLights(wx + 44, wy + 42, winIn);
+  ctx.save(); ctx.globalAlpha = winIn;
+  ctx.fillStyle = TXT; ctx.font = F(600, 34); ctx.textBaseline = 'middle';
+  ctx.fillText('AudioDrop', wx + 180, wy + 44);
+  ctx.fillStyle = DIM; ctx.font = F(400, 26, true);
+  ctx.fillText('~/AudioDrop', wx + WIN.w - 220, wy + 44);
+  ctx.strokeStyle = 'rgba(255,255,255,0.07)'; ctx.lineWidth = 1.5;
+  ctx.beginPath(); ctx.moveTo(wx, wy + 86); ctx.lineTo(wx + WIN.w, wy + 86); ctx.stroke();
+  ctx.restore();
+  const cy0 = wy + 86;                      // content top
+
+  // ------- phase flags -------
+  const dropDone   = s >= 2.15;
+  const procPhase  = seg(s, 2.6, 3.0);      // processing panel content in
+  const resultsIn  = seg(s, 11.4, 12.0);    // results replace processing
+  const showResults = s >= 11.4;
+
+  // ------- empty state / drag hint (before drop) -------
+  const emptyOut = 1 - eic(seg(s, 1.9, 2.3));
+  if (emptyOut > 0 && !showResults) {
+    ctx.save(); ctx.globalAlpha = winIn * emptyOut * (procPhase > 0 ? (1 - procPhase) : 1);
+    ctx.fillStyle = FAINT; ctx.font = F(400, 40);
+    const msg = 'Drop audio here';
+    ctx.fillText(msg, wx + (WIN.w - ctx.measureText(msg).width)/2, cy0 + 520);
+    ctx.strokeStyle = 'rgba(255,255,255,0.10)'; ctx.setLineDash([14, 14]); ctx.lineWidth = 2.5;
+    rr(wx + 120, cy0 + 340, WIN.w - 240, 360, 20); ctx.stroke(); ctx.setLineDash([]);
+    ctx.restore();
+  }
+
+  // ------- dragged file chip + cursor (0.9 - 2.5s) -------
+  const dragP = seg(s, 0.9, 2.15);
+  if (dragP > 0 && dragP < 1 + 0.3) {
+    const e = eio(cl(dragP));
+    const sx = 300, sy = 1980, ex = wx + WIN.w/2, ey = cy0 + 520;
+    const cxp = sx + (ex - sx) * e, cyp = sy + (ey - sy) * e - Math.sin(e * Math.PI) * 140;
+    if (s < 2.15) {
+      // chip follows cursor
+      const chw = 470, chh = 92;
+      glassPanel(cxp - chw/2, cyp - chh/2, chw, chh, 18, 0.96);
+      audioIcon(cxp - chw/2 + 30, cyp - 26, 52, GOLD_T, 1);
+      ctx.fillStyle = TXT; ctx.font = F(500, 32, true); ctx.textBaseline = 'middle';
+      ctx.fillText('interview.mp3', cxp - chw/2 + 128, cyp + 1);
+      cursor(cxp + 130, cyp + 20, 1);
+    }
+  }
+  // cursor exits after drop
+  const exitP = seg(s, 2.15, 2.8);
+  if (exitP > 0 && exitP < 1) {
+    const e = eic(exitP);
+    cursor(wx + WIN.w/2 + 130 + e * 1500, cy0 + 540 + e * 900, 1 - e);
+  }
+
+  // ------- processing content (2.6 - 11.4s) -------
+  if (!showResults && procPhase > 0) {
+    const a = eoc(procPhase);
+    ctx.save(); ctx.globalAlpha = a * winIn;
+    // file row at top
+    const frY = cy0 + 60;
+    ctx.fillStyle = 'rgba(255,255,255,0.045)'; rr(wx + 60, frY, WIN.w - 120, 110, 18); ctx.fill();
+    audioIcon(wx + 100, frY + 28, 56, GOLD_T, 1);
+    ctx.fillStyle = TXT; ctx.font = F(500, 34, true); ctx.textBaseline = 'middle';
+    ctx.fillText('interview.mp3', wx + 190, frY + 56);
+    ctx.fillStyle = SUB; ctx.font = F(400, 28);
+    ctx.fillText('3 min 12 s', wx + WIN.w - 300, frY + 56);
+    // stage rows
+    STAGES.forEach((st, i) => {
+      const ry = frY + 190 + i * 150;
+      const started = s >= st.t0, done = s >= st.t1;
+      const doneP = seg(s, st.t1, st.t1 + 0.35);
+      const rowA = started ? 1 : 0.38;
+      ctx.globalAlpha = a * rowA;
+      // status glyph
+      const gx = wx + 128, gy = ry + 28;
+      if (done) check(gx, gy, 34, doneP, 1);
+      else if (started) spinner(gx, gy, 22, s, 1);
+      else { ctx.strokeStyle = FAINT; ctx.lineWidth = 4; ctx.beginPath(); ctx.arc(gx, gy, 20, 0, 7); ctx.stroke(); }
+      // labels
+      ctx.fillStyle = done || started ? TXT : SUB; ctx.font = F(500, 36); ctx.textBaseline = 'middle';
+      ctx.fillText(st.name, wx + 200, ry + 28);
+      ctx.fillStyle = DIM; ctx.font = F(400, 27, true);
+      ctx.fillText(st.tool, wx + 200 + 460, ry + 30);
+      // per-stage progress hairline
+      if (started && !done) {
+        const pp = seg(s, st.t0, st.t1);
+        ctx.fillStyle = 'rgba(255,255,255,0.10)';
+        rr(wx + 200, ry + 66, WIN.w - 500, 5, 2.5); ctx.fill();
+        ctx.fillStyle = GOLD;
+        rr(wx + 200, ry + 66, (WIN.w - 500) * pp, 5, 2.5); ctx.fill();
+      }
+    });
+    // mini waveform: resolves during stages 2-3, speaker colors on stage 5
+    const resolveP = seg(s, 4.4, 7.4);           // isolate + level
+    const colorP = eoc(seg(s, 10.0, 10.6));      // labels land
+    for (const c of mcols) {
+      const mx = wx + MINI.relx + c.t * MINI.w;
+      const res = eoc(cl((resolveP * 1.25 - c.t) / 0.12));
+      // noise dots
+      if (res < 1) {
+        for (const d of c.dots) {
+          ctx.globalAlpha = a * d.op * (1 - res);
+          ctx.fillStyle = '#8B8B96';
+          ctx.fillRect(mx, MINI.y + d.dy, d.sz, d.sz);
+        }
+      }
+      // clean bar
+      if (res > 0) {
+        const sp = mturn(c.t);
+        const hh = sp < 0 ? 5 : (10 + c.env * MINI.hmax) ;
+        let fill = LIGHT, op = 0.85;
+        if (sp < 0) { fill = '#3A3A42'; op = 0.8; }
+        else if (sp === 0) { // gold only after labeling pass
+          fill = colorP > 0 ? GOLD : LIGHT;
+          op = 0.9;
+        }
+        ctx.globalAlpha = a * op * res;
+        ctx.fillStyle = fill;
+        rr(mx, MINI.y + 20 - hh/2, 5, hh, 2.5); ctx.fill();
+      }
+    }
+    ctx.restore();
+  }
+
+  // ------- results content (11.4s ->) -------
+  if (showResults) {
+    const a = eoc(resultsIn);
+    ctx.save(); ctx.globalAlpha = a * winIn;
+    // breadcrumb
+    ctx.fillStyle = SUB; ctx.font = F(400, 28, true); ctx.textBaseline = 'middle';
+    ctx.fillText('Processed / interview /', wx + 64, cy0 + 56);
+    FILES.forEach((f, i) => {
+      const rowIn = eoc(seg(s, 11.55 + i * 0.07, 11.95 + i * 0.07));
+      if (rowIn <= 0) return;
+      const ry = cy0 + 110 + i * 152 + (1 - rowIn) * 16;
+      ctx.globalAlpha = a * rowIn * winIn;
+      const hot = f[0] === 'transcript.txt';
+      ctx.fillStyle = hot ? 'rgba(201,169,106,0.07)' : 'rgba(255,255,255,0.045)';
+      rr(wx + 60, ry, WIN.w - 120, 122, 18); ctx.fill();
+      if (hot) { ctx.strokeStyle = 'rgba(201,169,106,0.28)'; ctx.lineWidth = 1.5; rr(wx + 60, ry, WIN.w - 120, 122, 18); ctx.stroke(); }
+      if (f[2] === 'audio') audioIcon(wx + 100, ry + 34, 54, hot ? GOLD_T : '#A9A9B4', 1);
+      else docIcon(wx + 104, ry + 30, 58, hot ? GOLD_T : '#A9A9B4', 1);
+      ctx.fillStyle = TXT; ctx.font = F(500, 33, true);
+      ctx.fillText(f[0], wx + 194, ry + 62);
+      ctx.fillStyle = DIM; ctx.font = F(400, 28, true);
+      const sw = ctx.measureText(f[1]).width;
+      ctx.fillText(f[1], wx + WIN.w - 120 - sw, ry + 62);
+    });
+    ctx.restore();
+  }
+
+  // ------- notifications -------
+  notification(s, 2.5, 5.0, 'Whisper Valet', 'interview: processing started');
+  notification(s, 10.6, 13.0, 'Whisper Valet', 'interview: transcript ready');
+
+  // ------- transcript window (13.0 ->) -------
+  const twIn = eoc(seg(s, 13.0, 13.6));
+  if (twIn > 0) {
+    const ty = TWIN.y + (1 - twIn) * 46;
+    glassPanel(TWIN.x, ty, TWIN.w, TWIN.h, TWIN.r, twIn);
+    trafficLights(TWIN.x + 44, ty + 42, twIn);
+    ctx.save(); ctx.globalAlpha = twIn;
+    ctx.fillStyle = TXT; ctx.font = F(600, 32, true); ctx.textBaseline = 'middle';
+    ctx.fillText('transcript.txt', TWIN.x + 180, ty + 44);
+    ctx.strokeStyle = 'rgba(255,255,255,0.07)'; ctx.lineWidth = 1.5;
+    ctx.beginPath(); ctx.moveTo(TWIN.x, ty + 86); ctx.lineTo(TWIN.x + TWIN.w, ty + 86); ctx.stroke();
+    // lines reveal
+    LINES.forEach((ln, i) => {
+      const la = eoc(seg(s, 13.7 + i * 0.5, 14.1 + i * 0.5));
+      if (la <= 0) return;
+      const ly = ty + 190 + i * 208 + (1 - la) * 14;
+      ctx.globalAlpha = twIn * la;
+      ctx.fillStyle = DIM; ctx.font = F(400, 27, true);
+      ctx.fillText(ln[0], TWIN.x + 70, ly);
+      chipLabel(ln[1], TWIN.x + 300, ly, ln[2], 1, 1);
+      ctx.fillStyle = '#C9CAD1'; ctx.font = F(400, 33);
+      ctx.fillText(ln[3], TWIN.x + 70, ly + 74);
+    });
+    // footer note
+    const fa = eoc(seg(s, 16.4, 16.9));
+    if (fa > 0) {
+      ctx.globalAlpha = twIn * fa;
+      ctx.fillStyle = DIM; ctx.font = F(400, 27, true);
+      ctx.fillText('report.txt: all segments confident, none flagged', TWIN.x + 70, ty + TWIN.h - 80);
+    }
+    ctx.restore();
+  }
+
+  // ------- end lockup (17.2 ->) -------
+  const endIn = eoc(seg(s, 17.2, 17.9));
+  if (endIn > 0) {
+    ctx.save();
+    ctx.globalAlpha = endIn;
+    ctx.letterSpacing = '-2.6px';
+    ctx.textBaseline = 'alphabetic';
+    const cy = H - 120 + (1 - endIn) * 24;
+    ctx.font = F(650, 92);
+    const w1 = ctx.measureText('Whisper ').width;
+    ctx.font = F(350, 92);
+    const w2 = ctx.measureText('Valet').width;
+    ctx.font = F(400, 34, true);
+    const url = 'github.com/yashkotha/whisper-valet';
+    const w3 = ctx.measureText(url).width;
+    const startX = (W - w1 - w2) / 2;
+    ctx.fillStyle = '#F5F5F7'; ctx.font = F(650, 92);
+    ctx.fillText('Whisper ', startX, cy);
+    ctx.fillStyle = '#C9CAD1'; ctx.font = F(350, 92);
+    ctx.fillText('Valet', startX + w1, cy);
+    ctx.letterSpacing = '0px';
+    ctx.fillStyle = DIM; ctx.font = F(400, 34, true);
+    ctx.fillText(url, (W - w3) / 2, cy + 62);
+    ctx.restore();
+  }
+
+  return true;
+};
+
+window.captureFrame = function(frame) {
+  window.renderFrame(frame);
+  return document.getElementById('c').toDataURL('image/png');
+};
+renderFrame(0);
+</script>
+</body>
+</html>

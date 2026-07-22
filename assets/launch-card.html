@@ -1,0 +1,175 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { width: 3200px; height: 1800px; overflow: hidden; }
+  body {
+    background: #0A0A0C;
+    font-family: -apple-system, "SF Pro Display", "Helvetica Neue", sans-serif;
+    font-kerning: normal;
+    font-feature-settings: "kern" 1;
+    text-rendering: optimizeLegibility;
+    position: relative;
+  }
+  /* subtle radial lift behind the wave so center reads first */
+  .glow {
+    position: absolute; left: 50%; top: 36%;
+    width: 2400px; height: 1100px;
+    transform: translate(-50%, -50%);
+    background: radial-gradient(ellipse at center, rgba(201,169,106,0.05) 0%, rgba(255,255,255,0.02) 35%, transparent 70%);
+  }
+  svg#wave { position: absolute; left: 0; top: 0; }
+  .chips {
+    position: absolute; top: 560px; width: 100%;
+    font-family: "SF Mono", ui-monospace, Menlo, monospace;
+  }
+  .chip {
+    position: absolute;
+    font-size: 26px; letter-spacing: 0.14em; font-weight: 500;
+    padding: 14px 26px; border-radius: 100px;
+    background: rgba(255,255,255,0.055);
+    border: 1px solid rgba(255,255,255,0.11);
+    backdrop-filter: blur(8px);
+    color: #B9B9C2;
+  }
+  .chip.s1 { color: #D4B77E; border-color: rgba(201,169,106,0.34); background: rgba(201,169,106,0.09); }
+  .chip.noise { color: #6E6E78; }
+  .text {
+    position: absolute; left: 0; right: 0; top: 1215px;
+    text-align: center;
+  }
+  h1 {
+    font-size: 138px; font-weight: 650; letter-spacing: -0.028em;
+    color: #F5F5F7;
+  }
+  h1 .thin { font-weight: 350; color: #C9CAD1; }
+  .tag {
+    margin-top: 44px;
+    font-size: 40px; font-weight: 400; letter-spacing: 0.002em;
+    color: #85858E;
+  }
+  .grain {
+    position: absolute; inset: 0; pointer-events: none; opacity: 0.55;
+  }
+</style>
+</head>
+<body>
+  <div class="glow"></div>
+
+  <svg id="wave" width="3200" height="1150" viewBox="0 0 3200 1150">
+    <g id="bars"></g>
+  </svg>
+
+  <div class="chips">
+    <span class="chip noise" id="chipNoise">NOISE</span>
+    <span class="chip s1" id="chipS1">SPEAKER 1</span>
+    <span class="chip" id="chipS2">SPEAKER 2</span>
+  </div>
+
+  <div class="text">
+    <h1>Whisper <span class="thin">Valet</span></h1>
+    <div class="tag">The backstage crew for MacWhisper</div>
+  </div>
+
+  <svg class="grain" width="3200" height="1800">
+    <filter id="g"><feTurbulence type="fractalNoise" baseFrequency="0.9" numOctaves="2" stitchTiles="stitch"/>
+      <feColorMatrix type="matrix" values="0 0 0 0 1  0 0 0 0 1  0 0 0 0 1  0 0 0 0.028 0"/></filter>
+    <rect width="3200" height="1800" filter="url(#g)"/>
+  </svg>
+
+<script>
+  // Deterministic PRNG so the render is reproducible
+  let seed = 20260722;
+  function rnd() { seed = (seed * 1103515245 + 12345) % 2147483648; return seed / 2147483648; }
+  const g = document.getElementById('bars');
+  const NS = 'http://www.w3.org/2000/svg';
+  const midY = 620;
+  const X0 = 180, X1 = 3020;         // wave spans the canvas with margins
+  const SPLIT = 0.52;                 // fraction where noise resolves into speech
+  const PITCH = 13;                   // horizontal pitch between columns
+
+  // A shared amplitude envelope so the noisy and clean halves feel like ONE recording
+  function envelope(t) {
+    return 0.35 + 0.65 * Math.abs(Math.sin(t * 9.1) * 0.55 + Math.sin(t * 23.7) * 0.3 + Math.sin(t * 3.3) * 0.35);
+  }
+
+  // Speaker turns on the clean side: [start, end, speaker] — boundaries are pauses.
+  // Gold (speaker 1) is the scarce accent; light bars carry most of the region.
+  const TURNS = [
+    [0.520, 0.625, 0], // S1 gold
+    [0.645, 0.800, 1], // S2 light
+    [0.818, 0.878, 0], // S1 gold
+    [0.896, 1.000, 1], // S2 light
+  ];
+  function turnAt(t) {
+    for (const [a, b, sp] of TURNS) if (t >= a && t <= b) return { sp, a, b };
+    return null; // between turns = pause
+  }
+  // taper amplitude toward each turn's edges so every bump is one clean phrase
+  function turnEnvelope(t, a, b) {
+    const edge = Math.min(t - a, b - t) / (b - a);
+    return Math.min(1, edge * 6);
+  }
+
+  for (let x = X0; x <= X1; x += PITCH) {
+    const t = (x - X0) / (X1 - X0);
+    const env = envelope(t);
+    if (t < SPLIT) {
+      // NOISE: dithered scatter. Chaos decays as we approach the split.
+      const chaos = Math.pow(1 - t / SPLIT, 0.65);           // 1 -> 0
+      const n = Math.round(4 + 26 * chaos * env);            // dots per column
+      for (let i = 0; i < n; i++) {
+        const spread = 40 + 330 * chaos * env;
+        const y = midY + (rnd() * 2 - 1) * spread;
+        const sz = 3 + Math.round(rnd() * 4);
+        const r = document.createElementNS(NS, 'rect');
+        r.setAttribute('x', x + (rnd() * 2 - 1) * 6);
+        r.setAttribute('y', y);
+        r.setAttribute('width', sz); r.setAttribute('height', sz);
+        const o = 0.10 + rnd() * 0.5 * (0.4 + 0.6 * chaos);
+        r.setAttribute('fill', '#8B8B96');
+        r.setAttribute('opacity', o.toFixed(2));
+        g.appendChild(r);
+      }
+      // faint underlying signal fighting through the noise
+      const h = 10 + env * 130 * (1 - chaos * 0.75);
+      const r2 = document.createElementNS(NS, 'rect');
+      r2.setAttribute('x', x); r2.setAttribute('y', midY - h / 2);
+      r2.setAttribute('width', 6); r2.setAttribute('height', h);
+      r2.setAttribute('rx', 3);
+      r2.setAttribute('fill', '#63636E');
+      r2.setAttribute('opacity', (0.22 + 0.5 * (1 - chaos)).toFixed(2));
+      g.appendChild(r2);
+    } else {
+      // CLEAN: crisp waveform bars, one contiguous color per speaker turn
+      const turn = turnAt(t);
+      let h, fill, op;
+      if (!turn) {                       // pause between turns
+        h = 8; fill = '#3A3A42'; op = 0.8;
+      } else {
+        h = 22 + env * 300 * turnEnvelope(t, turn.a, turn.b);
+        fill = turn.sp === 0 ? '#C9A96A' : '#D9DAE0';
+        op = turn.sp === 0 ? 0.95 : 0.88;
+      }
+      const r = document.createElementNS(NS, 'rect');
+      r.setAttribute('x', x); r.setAttribute('y', midY - h / 2);
+      r.setAttribute('width', 7); r.setAttribute('height', h);
+      r.setAttribute('rx', 3.5);
+      r.setAttribute('fill', fill);
+      r.setAttribute('opacity', op);
+      g.appendChild(r);
+    }
+  }
+
+  // position chips: noise chip over noisy half, speaker chips over their first segments
+  const w = (X1 - X0);
+  document.getElementById('chipNoise').style.left = (X0 + w * 0.21) + 'px';
+  document.getElementById('chipS1').style.left = (X0 + w * 0.535) + 'px';
+  document.getElementById('chipS2').style.left = (X0 + w * 0.685) + 'px';
+  // chips sit above the wave band
+  document.querySelector('.chips').style.top = '178px';
+</script>
+</body>
+</html>

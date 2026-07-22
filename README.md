@@ -1,5 +1,7 @@
 # Whisper Valet
 
+![Whisper Valet: noise resolving into speaker-labeled speech](assets/launch-card.png)
+
 **The backstage crew for [MacWhisper](https://goodsnooze.gumroad.com/l/macwhisper).**
 Hand the valet a rough recording — noisy room, one speaker mumbling into their
 coffee — and get back restored audio and a speaker-labeled transcript, per
@@ -27,6 +29,9 @@ Works for any recording and any number of speakers — a monologue, a two-person
 interview, a five-person panel. Also ships an **MCP server** so Claude (or any
 MCP client) can queue files, watch progress, and read transcripts
 conversationally.
+
+[Watch the 19-second demo](assets/demo.mp4) — drop, pipeline, results folder,
+labeled transcript.
 
 ## What the valet actually does
 
