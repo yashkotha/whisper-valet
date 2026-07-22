@@ -327,6 +327,166 @@ function notification(s, a, b, title, body) {
   ctx.restore();
 }
 
+// ---- cinematic hero (title card): node-graph close-up with DOF ----
+const heroBg = document.createElement('canvas');
+heroBg.width = W; heroBg.height = H;
+const heroMid = document.createElement('canvas');
+heroMid.width = W; heroMid.height = H;
+(function buildHeroLayers() {
+  const b = heroBg.getContext('2d');
+  b.fillStyle = '#0B0B0F'; b.fillRect(0, 0, W, H);
+  // dot grid
+  b.fillStyle = 'rgba(255,255,255,0.10)';
+  for (let gy = 40; gy < H; gy += 88)
+    for (let gx = 40; gx < W; gx += 88) b.fillRect(gx, gy, 4, 4);
+  // far cards (very blurred later)
+  const card = (x, y, w, h, warm) => {
+    const g = b.createLinearGradient(x, y, x + w, y + h);
+    if (warm) { g.addColorStop(0, 'rgba(140,60,25,0.9)'); g.addColorStop(1, 'rgba(210,90,35,0.75)'); }
+    else { g.addColorStop(0, 'rgba(34,34,42,0.95)'); g.addColorStop(1, 'rgba(24,24,30,0.95)'); }
+    b.fillStyle = g;
+    b.beginPath(); b.roundRect(x, y, w, h, 40); b.fill();
+    b.strokeStyle = 'rgba(255,255,255,0.14)'; b.lineWidth = 2;
+    b.beginPath(); b.roundRect(x, y, w, h, 40); b.stroke();
+  };
+  card(-200, -160, 1250, 700, false);
+  card(W - 620, -80, 900, 1350, true);          // big warm card off right edge
+  card(-350, H - 700, 1000, 800, false);
+  const m = heroMid.getContext('2d');
+  // wires
+  m.strokeStyle = 'rgba(255,255,255,0.22)'; m.lineWidth = 3.5;
+  m.beginPath(); m.moveTo(-50, 640); m.bezierCurveTo(420, 500, 520, 1240, 230, 1560); m.stroke();
+  m.beginPath(); m.moveTo(150, 1860); m.bezierCurveTo(560, 1700, 420, 1620, 232, 1562); m.stroke();
+  m.beginPath(); m.moveTo(W - 300, 380); m.bezierCurveTo(W - 700, 500, W - 500, 820, W - 260, 900); m.stroke();
+  const port = (x, y, c, r) => {
+    m.save(); m.shadowColor = c; m.shadowBlur = 34;
+    m.fillStyle = c; m.beginPath(); m.arc(x, y, r, 0, 7); m.fill();
+    m.restore();
+  };
+  port(230, 1560, '#F2F2F5', 26);
+  port(W - 260, 900, '#E8863C', 24);
+  port(560, 300, '#F2F2F5', 22);
+})();
+
+function drawHero(alpha, timeS) {
+  if (alpha <= 0) return;
+  ctx.save();
+  ctx.globalAlpha = alpha;
+  // DOF layers
+  ctx.filter = 'blur(30px) brightness(0.9)';
+  ctx.drawImage(heroBg, 0, 0);
+  ctx.filter = 'blur(9px)';
+  ctx.drawImage(heroMid, 0, 0);
+  ctx.filter = 'none';
+  // warm ambient wash behind the focal card
+  const wash = ctx.createRadialGradient(W*0.56, H*0.46, 100, W*0.56, H*0.46, 1500);
+  wash.addColorStop(0, 'rgba(214,120,50,0.16)');
+  wash.addColorStop(0.6, 'rgba(180,90,40,0.05)');
+  wash.addColorStop(1, 'rgba(0,0,0,0)');
+  ctx.fillStyle = wash; ctx.fillRect(0, 0, W, H);
+
+  // ---- focal node card (tilted, slow push-in) ----
+  const push = 1.045 - 0.045 * Math.min(1, timeS / 1.0);
+  const ccx = W * 0.56, ccy = H * 0.45;
+  ctx.translate(ccx, ccy);
+  ctx.rotate(-0.115);
+  ctx.scale(push, push);
+  const cw = 1680, ch = 800, cx0 = -cw/2, cy0 = -ch/2;
+  // card body: warm amber glass
+  ctx.shadowColor = 'rgba(0,0,0,0.6)'; ctx.shadowBlur = 130; ctx.shadowOffsetY = 44;
+  const bodyG = ctx.createLinearGradient(cx0, cy0, cx0 + cw, cy0 + ch);
+  bodyG.addColorStop(0, 'rgba(122,58,30,0.96)');
+  bodyG.addColorStop(0.55, 'rgba(158,86,44,0.94)');
+  bodyG.addColorStop(1, 'rgba(206,144,84,0.90)');
+  ctx.fillStyle = bodyG;
+  ctx.beginPath(); ctx.roundRect(cx0, cy0, cw, ch, 56); ctx.fill();
+  ctx.shadowColor = 'transparent';
+  // sheen + border
+  const sheenG = ctx.createLinearGradient(0, cy0, 0, cy0 + ch * 0.5);
+  sheenG.addColorStop(0, 'rgba(255,255,255,0.16)');
+  sheenG.addColorStop(1, 'rgba(255,255,255,0)');
+  ctx.fillStyle = sheenG;
+  ctx.beginPath(); ctx.roundRect(cx0, cy0, cw, ch * 0.5, 56); ctx.fill();
+  const bord = ctx.createLinearGradient(0, cy0, 0, cy0 + ch);
+  bord.addColorStop(0, 'rgba(255,235,210,0.5)');
+  bord.addColorStop(1, 'rgba(255,235,210,0.10)');
+  ctx.strokeStyle = bord; ctx.lineWidth = 2.5;
+  ctx.beginPath(); ctx.roundRect(cx0 + 1, cy0 + 1, cw - 2, ch - 2, 56); ctx.stroke();
+  // header
+  ctx.fillStyle = 'rgba(255,240,220,0.75)';
+  ctx.beginPath(); ctx.arc(cx0 + 78, cy0 + 92, 13, 0, 7); ctx.fill();
+  ctx.fillStyle = '#FFF6EA'; ctx.font = `600 58px ${SANS}`; ctx.textBaseline = 'middle';
+  ctx.fillText('Label speakers', cx0 + 122, cy0 + 94);
+  const tw = ctx.measureText('Label speakers').width;
+  ctx.font = `400 40px ${MONO}`; ctx.fillStyle = 'rgba(255,240,220,0.55)';
+  ctx.fillText('pyannote', cx0 + 122 + tw + 46, cy0 + 98);
+  ctx.strokeStyle = 'rgba(255,245,230,0.28)'; ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.moveTo(cx0 + 56, cy0 + 156); ctx.lineTo(cx0 + cw - 56, cy0 + 156); ctx.stroke();
+  // input ports
+  const portDot = (x, y, c) => {
+    ctx.save(); ctx.shadowColor = c; ctx.shadowBlur = 30;
+    ctx.fillStyle = c; ctx.beginPath(); ctx.arc(x, y, 27, 0, 7); ctx.fill();
+    ctx.restore();
+    ctx.strokeStyle = 'rgba(0,0,0,0.25)'; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.arc(x, y, 27, 0, 7); ctx.stroke();
+  };
+  portDot(cx0 + 6, cy0 + 300, '#F2F2F5');
+  ctx.fillStyle = '#FFF2E2'; ctx.font = `500 46px ${SANS}`;
+  ctx.fillText('cleaned', cx0 + 78, cy0 + 302);
+  portDot(cx0 + 6, cy0 + 432, '#E8863C');
+  ctx.fillText('original', cx0 + 78, cy0 + 434);
+  // output port
+  ctx.font = `500 44px ${SANS}`; ctx.fillStyle = 'rgba(255,246,234,0.92)';
+  const ow = ctx.measureText('TRANSCRIPT').width;
+  ctx.fillText('TRANSCRIPT', cx0 + cw - ow - 92, cy0 + 366);
+  portDot(cx0 + cw - 6, cy0 + 364, '#F2F2F5');
+  // labeled mini waveform inside the card
+  const wz = { x: cx0 + 84, w: cw - 168, y: cy0 + ch - 170 };
+  for (let i = 0; i < 90; i++) {
+    const t = i / 89;
+    const env = 0.35 + 0.65 * Math.abs(Math.sin(t*9.1)*0.55 + Math.sin(t*23.7)*0.3 + Math.sin(t*3.3)*0.35);
+    const sp = mturn(t);
+    const hh = sp < 0 ? 7 : 14 + env * 96;
+    ctx.fillStyle = sp < 0 ? 'rgba(40,22,12,0.5)' : (sp === 0 ? '#F5D9A8' : '#FFF6EA');
+    ctx.globalAlpha = alpha * (sp === 0 ? 1 : 0.9);
+    ctx.beginPath(); ctx.roundRect(wz.x + t * wz.w, wz.y - hh/2, 7, hh, 3.5); ctx.fill();
+  }
+  ctx.globalAlpha = alpha;
+  ctx.restore();
+
+  // ---- valet cursor + tag (sharp, unrotated) ----
+  ctx.save();
+  ctx.globalAlpha = alpha;
+  const cxr = W * 0.335, cyr = H * 0.635;
+  cursor(cxr, cyr, 1);
+  ctx.shadowColor = 'rgba(0,0,0,0.4)'; ctx.shadowBlur = 22; ctx.shadowOffsetY = 6;
+  ctx.fillStyle = '#FFFFFF';
+  ctx.font = `500 40px ${SANS}`;
+  const tagW = ctx.measureText('valet').width + 56;
+  ctx.beginPath(); ctx.roundRect(cxr + 30, cyr + 74, tagW, 74, 37); ctx.fill();
+  ctx.shadowColor = 'transparent';
+  ctx.fillStyle = '#1A1A20'; ctx.textBaseline = 'middle';
+  ctx.fillText('valet', cxr + 58, cyr + 113);
+  ctx.restore();
+
+  // ---- sharp brand block, bottom-left ----
+  ctx.save();
+  ctx.globalAlpha = alpha;
+  wordmark(SQ ? 150 : 220, H - 200, SQ ? 108 : 118, 1, 'left');
+  ctx.font = F(400, 42); ctx.fillStyle = '#9A9AA4';
+  ctx.fillText('The backstage crew for MacWhisper', (SQ ? 154 : 224), H - 128);
+  ctx.restore();
+
+  // vignette
+  ctx.save();
+  ctx.globalAlpha = alpha;
+  const hv = ctx.createRadialGradient(W/2, H/2, H*0.3, W/2, H/2, H*0.95);
+  hv.addColorStop(0, 'rgba(0,0,0,0)');
+  hv.addColorStop(1, 'rgba(0,0,0,0.42)');
+  ctx.fillStyle = hv; ctx.fillRect(0, 0, W, H);
+  ctx.restore();
+}
+
 // ============================================================
 window.renderFrame = function(frame) {
   const realS = frame / FPS;
@@ -542,20 +702,10 @@ window.renderFrame = function(frame) {
     ctx.restore();
   }
 
-  // ---- opening title card (frame 0 = thumbnail) ----
+  // ---- opening title card (frame 0 = thumbnail): cinematic hero ----
   if (realS < SHIFT) {
     const out = 1 - eic(seg(realS, SHIFT - 0.45, SHIFT - 0.05));
-    ctx.save();
-    ctx.globalAlpha = Math.min(1, out);
-    ctx.drawImage(orbCanvas, 0, 0, W, H);   // repaint ambient over the demo
-    ctx.fillStyle = 'rgba(11,11,15,0.35)'; ctx.fillRect(0, 0, W, H);
-    ctx.globalAlpha = out;
-    appTile(W/2 - 90, H/2 - 250, 180, 1);
-    wordmark(W/2, H/2 + 90, SQ ? 150 : 170, 1, 'center');
-    ctx.font = F(400, 50); ctx.fillStyle = '#8F8F99';
-    const tg = 'The backstage crew for MacWhisper';
-    ctx.fillText(tg, (W - ctx.measureText(tg).width)/2, H/2 + 194);
-    ctx.restore();
+    drawHero(Math.min(1, out), realS);
   }
 
   // ---- grain ----
