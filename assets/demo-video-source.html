@@ -9,23 +9,21 @@
 </style>
 </head>
 <body>
-<canvas id="c"></canvas>
+<canvas id="c" width="2160" height="2160"></canvas>
 <script>
 // ============================================================
-// Whisper Valet — glass demo. ?aspect=wide -> 3840x2160 still
-// scene; default -> 2160x2160 square video. Deterministic.
-// Glass: ambient orbs frost through translucent panels.
-// House feel: ease-out-cubic in, ease-in out, no bounce, gold scarce.
+// Whisper Valet — cinematic node-graph demo. 2160x2160 @60fps, 20s.
+// The pipeline as a living node canvas: camera pulls back from the
+// pyannote node, execution flows through glowing wires, transcript
+// fills a preview node. Deterministic per frame.
 // ============================================================
-const SQ = new URLSearchParams(location.search).get('aspect') !== 'wide';
-const W = SQ ? 2160 : 3840, H = 2160;
+const W = 2160, H = 2160;
 const cnv = document.getElementById('c');
-cnv.width = W; cnv.height = H;
 const ctx = cnv.getContext('2d');
-
 const FPS = 60, DUR = 20;
-const SHIFT = 1.0;                       // opening title card
 window.TOTAL = FPS * DUR;
+
+const TILT = -0.10;
 
 // ---- easing ----
 const eoc = t => 1 - Math.pow(1 - t, 3);
@@ -33,262 +31,319 @@ const eic = t => t * t * t;
 const eio = t => t < .5 ? 4*t*t*t : 1 - Math.pow(-2*t+2, 3)/2;
 const cl = v => Math.max(0, Math.min(1, v));
 const seg = (s, a, b) => cl((s - a) / (b - a));
+const lerp = (a, b, t) => a + (b - a) * t;
 
-// ---- palette ----
+// ---- palette / fonts ----
 const GOLD = '#C9A96A', GOLD_T = '#D4B77E', LIGHT = '#D9DAE0';
-const TXT = '#F2F2F5', SUB = '#A6A6AF', DIM = '#75757F', FAINT = '#55555E';
-
+const TXT = '#F2F2F5', SUB = '#A6A6AF', DIM = '#75757F';
 const SANS = '-apple-system, "SF Pro Display", "Helvetica Neue", sans-serif';
 const MONO = '"SF Mono", Menlo, monospace';
 const F = (w, s, mono) => `${w} ${s}px ${mono ? MONO : SANS}`;
 
 function mulberry(seed){return function(){seed|=0;seed=(seed+0x6D2B79F5)|0;let z=Math.imul(seed^(seed>>>15),1|seed);z=(z+Math.imul(z^(z>>>7),61|z))^z;return((z^(z>>>14))>>>0)/4294967296;};}
 
-// ---- layout (square vs wide) ----
-const L = SQ ? {
-  win:  { x: 200,  y: 300,  w: 1760, h: 1180, r: 34 },
-  twin: { x: 330,  y: 1060, w: 1710, h: 1000, r: 34 },
-  rowH: 100, rowPitch: 124, stagePitch: 136,
-  miniY: 1035, cursorStart: [140, 2060],
-  notifW: 700, fs: 1.0,
-} : {
-  win:  { x: 560,  y: 420,  w: 1660, h: 1330, r: 34 },
-  twin: { x: 2000, y: 560,  w: 1420, h: 1250, r: 34 },
-  rowH: 122, rowPitch: 152, stagePitch: 150,
-  miniY: 1540, cursorStart: [300, 1980],
-  notifW: 760, fs: 1.0,
-};
+function rr(c, x, y, w, h, r) {
+  c.beginPath();
+  c.moveTo(x+r, y);
+  c.arcTo(x+w, y, x+w, y+h, r); c.arcTo(x+w, y+h, x, y+h, r);
+  c.arcTo(x, y+h, x, y, r); c.arcTo(x, y, x+w, y, r);
+  c.closePath();
+}
 
-// ---- ambient orbs (rendered small, upscaled = cheap blur) ----
+// ---- speech envelope + turns (pyannote node waveform) ----
+function envelope(t) {
+  return 0.35 + 0.65 * Math.abs(Math.sin(t*9.1)*0.55 + Math.sin(t*23.7)*0.3 + Math.sin(t*3.3)*0.35);
+}
+const MTURNS = [[0.03,0.24,1],[0.28,0.42,0],[0.46,0.72,1],[0.76,0.88,0],[0.90,1.0,1]];
+function mturn(t){ for (const [a,b,sp] of MTURNS) if (t>=a&&t<=b) return sp; return -1; }
+
+// ============================================================
+// GRAPH LAYOUT (canvas space ~3500 x 2900)
+// ============================================================
+const N = {
+  src:      { x: 240,  y: 640,  w: 660, h: 340, title: 'interview.mp3', tool: 'source',     amber: false },
+  demucs:   { x: 1280, y: 400,  w: 700, h: 380, title: 'Isolate voices', tool: 'demucs',    amber: false },
+  loudnorm: { x: 1320, y: 1060, w: 660, h: 300, title: 'Lift quiet speaker', tool: 'loudnorm', amber: false },
+  whisper:  { x: 2340, y: 330,  w: 780, h: 540, title: 'Transcribe', tool: 'macwhisper',    amber: false },
+  pyannote: { x: 2280, y: 1160, w: 860, h: 440, title: 'Label speakers', tool: 'pyannote',  amber: true  },
+  preview:  { x: 2460, y: 1880, w: 840, h: 880, title: 'transcript.txt', tool: 'preview',   amber: false },
+};
+// stage schedule (node executes t0..t1)
+const SCHED = {
+  demucs:   [3.4, 6.6],
+  loudnorm: [6.6, 7.6],
+  whisper:  [7.6, 9.4],
+  pyannote: [9.4, 11.0],
+};
+// ports (canvas coords)
+const P = {
+  srcOut:      { x: N.src.x + N.src.w,      y: N.src.y + 170,  c: '#F2F2F5' },
+  demucsIn:    { x: N.demucs.x,             y: N.demucs.y + 160, c: '#F2F2F5' },
+  demucsOut:   { x: N.demucs.x + N.demucs.w, y: N.demucs.y + 160, c: '#F2F2F5' },
+  loudIn:      { x: N.loudnorm.x,           y: N.loudnorm.y + 150, c: '#F2F2F5' },
+  loudOut:     { x: N.loudnorm.x + N.loudnorm.w, y: N.loudnorm.y + 150, c: '#F2F2F5' },
+  whisperIn:   { x: N.whisper.x,            y: N.whisper.y + 170, c: '#F2F2F5' },
+  whisperOut:  { x: N.whisper.x + N.whisper.w, y: N.whisper.y + 170, c: '#F2F2F5' },
+  pyCleaned:   { x: N.pyannote.x,           y: N.pyannote.y + 170, c: '#F2F2F5' },
+  pyOriginal:  { x: N.pyannote.x,           y: N.pyannote.y + 280, c: '#E8863C' },
+  pyOut:       { x: N.pyannote.x + N.pyannote.w, y: N.pyannote.y + 210, c: '#F2F2F5' },
+  prevWords:   { x: N.preview.x,            y: N.preview.y + 150, c: '#F2F2F5' },
+  prevSpk:     { x: N.preview.x,            y: N.preview.y + 250, c: '#E8863C' },
+};
+// wires: from, to, control offsets, activeDuring (stage key or 'final')
+const WIRES = [
+  { a: P.srcOut,    b: P.demucsIn,  c1: [220, 0],  c2: [-220, 0],  st: 'demucs' },
+  { a: P.srcOut,    b: P.pyOriginal, c1: [340, 700], c2: [-520, 60], st: 'pyannote' },   // the design decision
+  { a: P.demucsOut, b: P.loudIn,    c1: [200, 300], c2: [-260, -40], st: 'loudnorm' },
+  { a: P.loudOut,   b: P.whisperIn, c1: [260, -160], c2: [-300, 120], st: 'whisper' },
+  { a: P.loudOut,   b: P.pyCleaned, c1: [180, 160], c2: [-260, -60], st: 'pyannote' },
+  { a: P.whisperOut, b: P.prevWords, c1: [260, 240], c2: [-300, -420], st: 'final' },
+  { a: P.pyOut,     b: P.prevSpk,   c1: [200, 260], c2: [-260, -160], st: 'final' },
+];
+
+// ---- camera keyframes {t, cx, cy, z} ----
+const CAM = [
+  { t: 0.0,  cx: 2710, cy: 1380, z: 1.30 },
+  { t: 1.0,  cx: 2710, cy: 1380, z: 1.30 },
+  { t: 2.3,  cx: 1050, cy: 1000, z: 0.72 },
+  { t: 3.6,  cx: 1560, cy: 1030, z: 0.60 },
+  { t: 7.2,  cx: 1900, cy: 1000, z: 0.62 },
+  { t: 9.8,  cx: 2420, cy: 1080, z: 0.68 },
+  { t: 11.4, cx: 2680, cy: 1360, z: 0.78 },
+  { t: 13.6, cx: 2840, cy: 2140, z: 0.80 },
+  { t: 17.5, cx: 2870, cy: 2230, z: 0.88 },
+  { t: 20.0, cx: 2870, cy: 2250, z: 0.90 },
+];
+function camera(s) {
+  let i = 0;
+  while (i < CAM.length - 2 && s > CAM[i+1].t) i++;
+  const a = CAM[i], b = CAM[i+1];
+  const t = eio(seg(s, a.t, b.t));
+  return { cx: lerp(a.cx, b.cx, t), cy: lerp(a.cy, b.cy, t), z: lerp(a.z, b.z, t) };
+}
+
+// ---- ambient orbs (screen space, cheap blur via low-res) ----
 const orbCanvas = document.createElement('canvas');
 orbCanvas.width = W / 12; orbCanvas.height = H / 12;
-const octx = orbCanvas.getContext('2d');
-const ORBS = [
-  { bx: 0.22, by: 0.16, r: 0.42, c: '201,169,106', a: 0.10, k1: 1, k2: 2, ph: 0.3 },
-  { bx: 0.85, by: 0.70, r: 0.50, c: '91,107,140',  a: 0.10, k1: 2, k2: 1, ph: 2.1 },
-  { bx: 0.45, by: 1.02, r: 0.44, c: '160,120,90',  a: 0.06, k1: 1, k2: 1, ph: 4.2 },
-  { bx: 0.70, by: 0.05, r: 0.36, c: '120,130,150', a: 0.07, k1: 2, k2: 2, ph: 5.5 },
-];
-function paintOrbs(timeS) {
-  const w = orbCanvas.width, h = orbCanvas.height;
-  octx.fillStyle = '#0B0B0F';
-  octx.fillRect(0, 0, w, h);
-  for (const o of ORBS) {
-    const x = (o.bx + 0.05 * Math.sin(2*Math.PI*o.k1*timeS/DUR + o.ph)) * w;
-    const y = (o.by + 0.05 * Math.cos(2*Math.PI*o.k2*timeS/DUR + o.ph)) * h;
-    const r = o.r * w;
-    const g = octx.createRadialGradient(x, y, 0, x, y, r);
-    g.addColorStop(0, `rgba(${o.c},${o.a})`);
-    g.addColorStop(1, `rgba(${o.c},0)`);
-    octx.fillStyle = g;
-    octx.fillRect(0, 0, w, h);
+(function () {
+  const o = orbCanvas.getContext('2d');
+  o.fillStyle = '#0B0B0F'; o.fillRect(0, 0, orbCanvas.width, orbCanvas.height);
+  const orb = (x, y, r, c, a) => {
+    const g = o.createRadialGradient(x*orbCanvas.width, y*orbCanvas.height, 0, x*orbCanvas.width, y*orbCanvas.height, r*orbCanvas.width);
+    g.addColorStop(0, `rgba(${c},${a})`); g.addColorStop(1, `rgba(${c},0)`);
+    o.fillStyle = g; o.fillRect(0, 0, orbCanvas.width, orbCanvas.height);
+  };
+  orb(0.85, 0.25, 0.55, '190,95,40', 0.14);
+  orb(0.15, 0.75, 0.5,  '91,107,140', 0.10);
+  orb(0.5, 1.05, 0.4,   '160,120,90', 0.07);
+})();
+
+// ---- DOF edge mask (center sharp, edges blurred) ----
+const dofMask = document.createElement('canvas');
+dofMask.width = W; dofMask.height = H;
+(function () {
+  const m = dofMask.getContext('2d');
+  const g = m.createRadialGradient(W/2, H/2, H*0.30, W/2, H/2, H*0.78);
+  g.addColorStop(0, 'rgba(0,0,0,0)');
+  g.addColorStop(1, 'rgba(0,0,0,1)');
+  m.fillStyle = g; m.fillRect(0, 0, W, H);
+})();
+const dofTmp = document.createElement('canvas');
+dofTmp.width = W; dofTmp.height = H;
+const dofCtx = dofTmp.getContext('2d');
+
+// ============================================================
+// drawing helpers (all take the 2d context)
+// ============================================================
+function nodeGlass(c, n, alpha, state) {
+  // state: 0 pending, 1 active, 2 done
+  c.save();
+  c.globalAlpha = alpha * (state === 0 ? 0.82 : 1);
+  c.shadowColor = 'rgba(0,0,0,0.55)'; c.shadowBlur = 70; c.shadowOffsetY = 24;
+  if (n.amber) {
+    const g = c.createLinearGradient(n.x, n.y, n.x + n.w, n.y + n.h);
+    g.addColorStop(0, 'rgba(122,58,30,0.97)');
+    g.addColorStop(0.55, 'rgba(158,86,44,0.95)');
+    g.addColorStop(1, 'rgba(206,144,84,0.9)');
+    c.fillStyle = g;
+  } else {
+    const g = c.createLinearGradient(n.x, n.y, n.x, n.y + n.h);
+    g.addColorStop(0, 'rgba(38,38,46,0.94)');
+    g.addColorStop(1, 'rgba(26,26,33,0.95)');
+    c.fillStyle = g;
   }
+  rr(c, n.x, n.y, n.w, n.h, 34); c.fill();
+  c.shadowColor = 'transparent';
+  // sheen
+  const sh = c.createLinearGradient(0, n.y, 0, n.y + n.h * 0.45);
+  sh.addColorStop(0, 'rgba(255,255,255,0.10)');
+  sh.addColorStop(1, 'rgba(255,255,255,0)');
+  c.fillStyle = sh;
+  rr(c, n.x, n.y, n.w, n.h * 0.45, 34); c.fill();
+  // border: gold glow while active
+  if (state === 1) {
+    c.shadowColor = 'rgba(201,169,106,0.8)'; c.shadowBlur = 34;
+    c.strokeStyle = 'rgba(212,183,126,0.85)'; c.lineWidth = 3;
+  } else {
+    const bg = c.createLinearGradient(0, n.y, 0, n.y + n.h);
+    bg.addColorStop(0, n.amber ? 'rgba(255,235,210,0.5)' : 'rgba(255,255,255,0.22)');
+    bg.addColorStop(1, n.amber ? 'rgba(255,235,210,0.12)' : 'rgba(255,255,255,0.06)');
+    c.strokeStyle = bg; c.lineWidth = 2;
+  }
+  rr(c, n.x + 1, n.y + 1, n.w - 2, n.h - 2, 34); c.stroke();
+  c.shadowColor = 'transparent';
+  c.restore();
 }
-
-function rr(x, y, w, h, r) {
-  ctx.beginPath();
-  ctx.moveTo(x+r, y);
-  ctx.arcTo(x+w, y, x+w, y+h, r); ctx.arcTo(x+w, y+h, x, y+h, r);
-  ctx.arcTo(x, y+h, x, y, r); ctx.arcTo(x, y, x+w, y, r);
-  ctx.closePath();
+function nodeHeader(c, n, alpha, state, doneP) {
+  c.save();
+  c.globalAlpha = alpha;
+  const hx = n.x + 44, hy = n.y + 62;
+  // status glyph
+  if (state === 2) {           // check
+    c.strokeStyle = n.amber ? '#FFE9C4' : GOLD; c.lineWidth = 5; c.lineCap = 'round'; c.lineJoin = 'round';
+    c.shadowColor = 'rgba(201,169,106,0.5)'; c.shadowBlur = 12;
+    const t = eoc(cl(doneP)); const sx = hx, sy = hy;
+    c.beginPath(); c.moveTo(sx - 14, sy + 2);
+    if (t < 0.45) { const k = t/0.45; c.lineTo(sx - 14 + 10*k, sy + 2 + 10*k); }
+    else { c.lineTo(sx - 4, sy + 12); const k = (t-0.45)/0.55; c.lineTo(sx - 4 + 20*k, sy + 12 - 24*k); }
+    c.stroke(); c.shadowColor = 'transparent';
+  } else {
+    c.fillStyle = state === 1 ? GOLD_T : 'rgba(255,255,255,0.4)';
+    c.beginPath(); c.arc(hx, hy, 9, 0, 7); c.fill();
+  }
+  const tcol = n.amber ? '#FFF6EA' : TXT;
+  c.fillStyle = tcol; c.font = F(600, 40); c.textBaseline = 'middle';
+  c.fillText(n.title, hx + 34, hy + 1);
+  const tw = c.measureText(n.title).width;
+  c.font = F(400, 28, true);
+  c.fillStyle = n.amber ? 'rgba(255,240,220,0.55)' : DIM;
+  c.fillText(n.tool, hx + 34 + tw + 30, hy + 3);
+  c.strokeStyle = n.amber ? 'rgba(255,245,230,0.28)' : 'rgba(255,255,255,0.09)';
+  c.lineWidth = 1.5;
+  c.beginPath(); c.moveTo(n.x + 36, n.y + 106); c.lineTo(n.x + n.w - 36, n.y + 106); c.stroke();
+  c.restore();
 }
-
-// ---- the glass system ----
-function glass(x, y, w, h, r, alpha, opts = {}) {
+function portDot(c, p, alpha, lit) {
+  c.save();
+  c.globalAlpha = alpha;
+  c.shadowColor = p.c; c.shadowBlur = lit ? 34 : 18;
+  c.fillStyle = p.c;
+  c.beginPath(); c.arc(p.x, p.y, 19, 0, 7); c.fill();
+  c.restore();
+}
+function portLabel(c, p, text, side, alpha, amber) {
+  c.save();
+  c.globalAlpha = alpha;
+  c.font = F(500, 32);
+  c.fillStyle = amber ? '#FFF2E2' : '#D6D6DE';
+  c.textBaseline = 'middle';
+  const w = c.measureText(text).width;
+  c.fillText(text, side === 'l' ? p.x + 42 : p.x - 42 - w, p.y + 1);
+  c.restore();
+}
+function bez(w) {
+  return [w.a.x, w.a.y, w.a.x + w.c1[0], w.a.y + w.c1[1], w.b.x + w.c2[0], w.b.y + w.c2[1], w.b.x, w.b.y];
+}
+function bezPoint(pts, t) {
+  const [x0,y0,x1,y1,x2,y2,x3,y3] = pts;
+  const u = 1 - t;
+  return {
+    x: u*u*u*x0 + 3*u*u*t*x1 + 3*u*t*t*x2 + t*t*t*x3,
+    y: u*u*u*y0 + 3*u*u*t*y1 + 3*u*t*t*y2 + t*t*t*y3,
+  };
+}
+function audioIconC(c, x, y, s, color, alpha) {
+  c.save(); c.globalAlpha = alpha; c.fillStyle = color;
+  const hs = [0.45, 0.8, 0.6, 1.0, 0.5, 0.75, 0.4];
+  hs.forEach((h, i) => { const bh = s * h; rr(c, x + i*s*0.22, y + (s-bh)/2, s*0.13, bh, s*0.065); c.fill(); });
+  c.restore();
+}
+function cursorC(c, x, y, alpha, scale) {
+  c.save(); c.globalAlpha = alpha;
+  c.translate(x, y); c.scale(scale, scale); c.translate(-x, -y);
+  c.shadowColor = 'rgba(0,0,0,0.5)'; c.shadowBlur = 12; c.shadowOffsetY = 3;
+  c.fillStyle = '#FFFFFF'; c.strokeStyle = 'rgba(0,0,0,0.55)'; c.lineWidth = 2.5;
+  c.beginPath();
+  c.moveTo(x, y); c.lineTo(x, y + 46); c.lineTo(x + 11, y + 36);
+  c.lineTo(x + 17, y + 51); c.lineTo(x + 25, y + 47); c.lineTo(x + 18, y + 33);
+  c.lineTo(x + 33, y + 33); c.closePath();
+  c.fill(); c.stroke();
+  c.restore();
+}
+function tagC(c, x, y, text, alpha) {
+  c.save(); c.globalAlpha = alpha;
+  c.font = F(500, 30);
+  const w = c.measureText(text).width + 44;
+  c.shadowColor = 'rgba(0,0,0,0.4)'; c.shadowBlur = 16; c.shadowOffsetY = 4;
+  c.fillStyle = '#FFFFFF';
+  rr(c, x, y, w, 56, 28); c.fill();
+  c.shadowColor = 'transparent';
+  c.fillStyle = '#1A1A20'; c.textBaseline = 'middle';
+  c.fillText(text, x + 22, y + 30);
+  c.restore();
+}
+function chipC(c, label, cx, cy, gold, alpha, scale) {
+  c.save(); c.globalAlpha = alpha;
+  c.font = F(500, 24 * scale, true);
+  const pad = 20 * scale, tw = c.measureText(label).width + label.length * 2.6 * scale;
+  const w = tw + pad*2, h = 48 * scale, x = cx - 0, y = cy - h/2;
+  c.fillStyle = gold ? 'rgba(201,169,106,0.13)' : 'rgba(255,255,255,0.07)';
+  rr(c, x, y, w, h, h/2); c.fill();
+  c.strokeStyle = gold ? 'rgba(212,183,126,0.45)' : 'rgba(255,255,255,0.16)';
+  c.lineWidth = 1.5; rr(c, x, y, w, h, h/2); c.stroke();
+  c.fillStyle = gold ? GOLD_T : '#C2C2CB';
+  c.textBaseline = 'middle';
+  let lx = x + pad;
+  for (const ch of label) { c.fillText(ch, lx, cy + 1); lx += c.measureText(ch).width + 2.6 * scale; }
+  c.restore();
+  }
+function wordmarkC(c, cx, cy, size, alpha, align) {
   if (alpha <= 0) return;
-  const tint = opts.tint || 'rgba(16,16,22,0.55)';
-  ctx.save();
-  ctx.globalAlpha = alpha;
-  // deep soft shadow
-  ctx.shadowColor = 'rgba(0,0,0,0.5)';
-  ctx.shadowBlur = 110; ctx.shadowOffsetY = 36;
-  ctx.fillStyle = 'rgba(10,10,14,0.9)';
-  rr(x, y, w, h, r); ctx.fill();
-  ctx.shadowColor = 'transparent'; ctx.shadowBlur = 0; ctx.shadowOffsetY = 0;
-  // frost: ambient orbs show through, brightened
-  ctx.save();
-  rr(x, y, w, h, r); ctx.clip();
-  ctx.filter = 'saturate(1.35) brightness(1.5)';
-  ctx.drawImage(orbCanvas, 0, 0, W, H);
-  ctx.filter = 'none';
-  ctx.fillStyle = tint;
-  ctx.fillRect(x, y, w, h);
-  ctx.fillStyle = 'rgba(255,255,255,0.045)';
-  ctx.fillRect(x, y, w, h);
-  // top sheen
-  const sheen = ctx.createLinearGradient(0, y, 0, y + h * 0.38);
-  sheen.addColorStop(0, 'rgba(255,255,255,0.10)');
-  sheen.addColorStop(1, 'rgba(255,255,255,0)');
-  ctx.fillStyle = sheen;
-  ctx.fillRect(x, y, w, h * 0.38);
-  ctx.restore();
-  // gradient border: bright top, faint bottom
-  const bg = ctx.createLinearGradient(0, y, 0, y + h);
-  bg.addColorStop(0, 'rgba(255,255,255,0.28)');
-  bg.addColorStop(0.25, 'rgba(255,255,255,0.10)');
-  bg.addColorStop(1, 'rgba(255,255,255,0.05)');
-  ctx.strokeStyle = bg; ctx.lineWidth = 2;
-  rr(x+1, y+1, w-2, h-2, r); ctx.stroke();
-  ctx.restore();
+  c.save();
+  c.globalAlpha = alpha;
+  c.textBaseline = 'alphabetic';
+  c.letterSpacing = `${-size * 0.028}px`;
+  c.font = `650 ${size}px ${SANS}`;
+  const w1 = c.measureText('Whisper ').width;
+  c.font = `350 ${size}px ${SANS}`;
+  const w2 = c.measureText('Valet').width;
+  const sx = align === 'left' ? cx : cx - (w1 + w2) / 2;
+  c.fillStyle = '#F5F5F7';
+  c.font = `650 ${size}px ${SANS}`;
+  c.fillText('Whisper ', sx, cy);
+  c.fillStyle = '#CBCCD3';
+  c.font = `350 ${size}px ${SANS}`;
+  c.fillText('Valet', sx + w1, cy);
+  c.letterSpacing = '0px';
+  c.restore();
 }
-function glassRow(x, y, w, h, r, alpha, hot) {
+function appTileC(c, x, y, s, alpha) {
   if (alpha <= 0) return;
-  ctx.save();
-  ctx.globalAlpha = alpha;
-  ctx.fillStyle = hot ? 'rgba(201,169,106,0.10)' : 'rgba(255,255,255,0.055)';
-  rr(x, y, w, h, r); ctx.fill();
-  const bg = ctx.createLinearGradient(0, y, 0, y + h);
-  bg.addColorStop(0, hot ? 'rgba(212,183,126,0.45)' : 'rgba(255,255,255,0.16)');
-  bg.addColorStop(1, hot ? 'rgba(212,183,126,0.15)' : 'rgba(255,255,255,0.05)');
-  ctx.strokeStyle = bg; ctx.lineWidth = 1.5;
-  rr(x+0.75, y+0.75, w-1.5, h-1.5, r); ctx.stroke();
-  ctx.restore();
-}
-function trafficLights(x, y, alpha) {
-  const cols = ['#FF5F57', '#FEBC2E', '#28C840'];
-  ctx.save(); ctx.globalAlpha = alpha;
-  cols.forEach((c, i) => {
-    ctx.fillStyle = c;
-    ctx.beginPath(); ctx.arc(x + i*46, y, 12.5, 0, 7); ctx.fill();
-    const gl = ctx.createRadialGradient(x + i*46 - 4, y - 5, 0, x + i*46, y, 13);
-    gl.addColorStop(0, 'rgba(255,255,255,0.5)');
-    gl.addColorStop(0.5, 'rgba(255,255,255,0.05)');
-    gl.addColorStop(1, 'rgba(255,255,255,0)');
-    ctx.fillStyle = gl;
-    ctx.beginPath(); ctx.arc(x + i*46, y, 12.5, 0, 7); ctx.fill();
-  });
-  ctx.restore();
-}
-function appTile(x, y, s, alpha) {   // glass gold app icon with W
-  if (alpha <= 0) return;
-  ctx.save(); ctx.globalAlpha = alpha;
-  ctx.shadowColor = 'rgba(0,0,0,0.4)'; ctx.shadowBlur = 40; ctx.shadowOffsetY = 12;
-  const g = ctx.createLinearGradient(0, y, 0, y + s);
+  c.save(); c.globalAlpha = alpha;
+  c.shadowColor = 'rgba(0,0,0,0.4)'; c.shadowBlur = 40; c.shadowOffsetY = 12;
+  const g = c.createLinearGradient(0, y, 0, y + s);
   g.addColorStop(0, 'rgba(212,183,126,0.30)');
   g.addColorStop(1, 'rgba(160,120,70,0.16)');
-  ctx.fillStyle = g;
-  rr(x, y, s, s, s*0.24); ctx.fill();
-  ctx.shadowColor = 'transparent';
-  const bg = ctx.createLinearGradient(0, y, 0, y + s);
+  c.fillStyle = g; rr(c, x, y, s, s, s*0.24); c.fill();
+  c.shadowColor = 'transparent';
+  const bg = c.createLinearGradient(0, y, 0, y + s);
   bg.addColorStop(0, 'rgba(255,235,200,0.55)');
   bg.addColorStop(1, 'rgba(212,183,126,0.12)');
-  ctx.strokeStyle = bg; ctx.lineWidth = 2;
-  rr(x+1, y+1, s-2, s-2, s*0.24); ctx.stroke();
-  const sheen = ctx.createLinearGradient(0, y, 0, y + s*0.5);
-  sheen.addColorStop(0, 'rgba(255,255,255,0.22)');
-  sheen.addColorStop(1, 'rgba(255,255,255,0)');
-  ctx.fillStyle = sheen;
-  rr(x, y, s, s*0.5, s*0.24); ctx.fill();
-  ctx.fillStyle = '#F0DDB8';
-  ctx.font = `650 ${s*0.52}px ${SANS}`;
-  ctx.textBaseline = 'middle'; ctx.textAlign = 'center';
-  ctx.fillText('W', x + s/2, y + s/2 + s*0.03);
-  ctx.textAlign = 'left';
-  ctx.restore();
-}
-function audioIcon(x, y, s, color, alpha) {
-  ctx.save(); ctx.globalAlpha = alpha; ctx.fillStyle = color;
-  const hs = [0.45, 0.8, 0.6, 1.0, 0.5, 0.75, 0.4];
-  hs.forEach((h, i) => { const bh = s * h; rr(x + i*s*0.22, y + (s-bh)/2, s*0.13, bh, s*0.065); ctx.fill(); });
-  ctx.restore();
-}
-function docIcon(x, y, s, color, alpha) {
-  ctx.save(); ctx.globalAlpha = alpha;
-  ctx.strokeStyle = color; ctx.lineWidth = s * 0.09;
-  const w = s * 0.78, f = s * 0.26;
-  rr(x, y, w, s, s*0.10); ctx.stroke();
-  ctx.beginPath(); ctx.moveTo(x + w - f, y); ctx.lineTo(x + w - f, y + f); ctx.lineTo(x + w, y + f);
-  ctx.stroke();
-  ctx.restore();
-}
-function spinner(cx, cy, r, timeS, alpha) {
-  ctx.save(); ctx.globalAlpha = alpha;
-  ctx.strokeStyle = SUB; ctx.lineWidth = 5.5; ctx.lineCap = 'round';
-  const a0 = (timeS * 4.2) % (Math.PI * 2);
-  ctx.beginPath(); ctx.arc(cx, cy, r, a0, a0 + Math.PI * 1.4); ctx.stroke();
-  ctx.restore();
-}
-function check(cx, cy, s, prog, alpha) {
-  if (prog <= 0) return;
-  ctx.save(); ctx.globalAlpha = alpha;
-  ctx.strokeStyle = GOLD; ctx.lineWidth = 6.5; ctx.lineCap = 'round'; ctx.lineJoin = 'round';
-  ctx.shadowColor = 'rgba(201,169,106,0.45)'; ctx.shadowBlur = 18;
-  const p1 = {x: cx - s*0.5, y: cy + s*0.05}, p2 = {x: cx - s*0.12, y: cy + s*0.42}, p3 = {x: cx + s*0.55, y: cy - s*0.38};
-  ctx.beginPath(); ctx.moveTo(p1.x, p1.y);
-  const t = eoc(prog);
-  if (t < 0.45) { const k = t/0.45; ctx.lineTo(p1.x + (p2.x-p1.x)*k, p1.y + (p2.y-p1.y)*k); }
-  else { ctx.lineTo(p2.x, p2.y); const k = (t-0.45)/0.55; ctx.lineTo(p2.x + (p3.x-p2.x)*k, p2.y + (p3.y-p2.y)*k); }
-  ctx.stroke();
-  ctx.restore();
-}
-function cursor(x, y, alpha) {
-  ctx.save(); ctx.globalAlpha = alpha;
-  ctx.shadowColor = 'rgba(0,0,0,0.5)'; ctx.shadowBlur = 14; ctx.shadowOffsetY = 4;
-  ctx.fillStyle = '#FFFFFF'; ctx.strokeStyle = 'rgba(0,0,0,0.55)'; ctx.lineWidth = 3;
-  ctx.beginPath();
-  ctx.moveTo(x, y); ctx.lineTo(x, y + 56); ctx.lineTo(x + 13, y + 44);
-  ctx.lineTo(x + 21, y + 62); ctx.lineTo(x + 30, y + 58); ctx.lineTo(x + 22, y + 40);
-  ctx.lineTo(x + 40, y + 40); ctx.closePath();
-  ctx.fill(); ctx.stroke();
-  ctx.restore();
-}
-function chipLabel(label, cx, cy, gold, alpha, scale) {
-  if (alpha <= 0) return;
-  ctx.save(); ctx.globalAlpha = alpha;
-  ctx.font = F(500, 27 * scale, true);
-  const pad = 26 * scale, tw = ctx.measureText(label).width + label.length * 3.2 * scale;
-  const w = tw + pad*2, h = 56 * scale, x = cx - w/2, y = cy - h/2;
-  ctx.fillStyle = gold ? 'rgba(201,169,106,0.12)' : 'rgba(255,255,255,0.07)';
-  rr(x, y, w, h, h/2); ctx.fill();
-  const bg = ctx.createLinearGradient(0, y, 0, y + h);
-  bg.addColorStop(0, gold ? 'rgba(212,183,126,0.5)' : 'rgba(255,255,255,0.2)');
-  bg.addColorStop(1, gold ? 'rgba(212,183,126,0.15)' : 'rgba(255,255,255,0.06)');
-  ctx.strokeStyle = bg; ctx.lineWidth = 1.5;
-  rr(x, y, w, h, h/2); ctx.stroke();
-  ctx.fillStyle = gold ? GOLD_T : '#C2C2CB';
-  ctx.textBaseline = 'middle';
-  let lx = x + pad;
-  for (const ch of label) { ctx.fillText(ch, lx, cy + 1); lx += ctx.measureText(ch).width + 3.2 * scale; }
-  ctx.restore();
-}
-function wordmark(cx, cy, size, alpha, align) {
-  if (alpha <= 0) return;
-  ctx.save();
-  ctx.globalAlpha = alpha;
-  ctx.textBaseline = 'alphabetic';
-  ctx.letterSpacing = `${-size * 0.028}px`;
-  ctx.font = `650 ${size}px ${SANS}`;
-  const w1 = ctx.measureText('Whisper ').width;
-  ctx.font = `350 ${size}px ${SANS}`;
-  const w2 = ctx.measureText('Valet').width;
-  const sx = align === 'left' ? cx : cx - (w1 + w2) / 2;
-  ctx.fillStyle = '#F5F5F7';
-  ctx.font = `650 ${size}px ${SANS}`;
-  ctx.fillText('Whisper ', sx, cy);
-  ctx.fillStyle = '#CBCCD3';
-  ctx.font = `350 ${size}px ${SANS}`;
-  ctx.fillText('Valet', sx + w1, cy);
-  ctx.letterSpacing = '0px';
-  ctx.restore();
+  c.strokeStyle = bg; c.lineWidth = 2;
+  rr(c, x+1, y+1, s-2, s-2, s*0.24); c.stroke();
+  const sh = c.createLinearGradient(0, y, 0, y + s*0.5);
+  sh.addColorStop(0, 'rgba(255,255,255,0.22)');
+  sh.addColorStop(1, 'rgba(255,255,255,0)');
+  c.fillStyle = sh; rr(c, x, y, s, s*0.5, s*0.24); c.fill();
+  c.fillStyle = '#F0DDB8';
+  c.font = `650 ${s*0.52}px ${SANS}`;
+  c.textBaseline = 'middle'; c.textAlign = 'center';
+  c.fillText('W', x + s/2, y + s/2 + s*0.03);
+  c.textAlign = 'left';
+  c.restore();
 }
 
-// ---- content ----
-const STAGES = [
-  { name: 'Extract audio',      tool: 'ffmpeg',     t0: 3.3, t1: 4.6 },
-  { name: 'Isolate voices',     tool: 'demucs',     t0: 4.6, t1: 6.9 },
-  { name: 'Lift quiet speaker', tool: 'loudnorm',   t0: 6.9, t1: 7.7 },
-  { name: 'Transcribe',         tool: 'macwhisper', t0: 7.7, t1: 9.3 },
-  { name: 'Label speakers',     tool: 'pyannote',   t0: 9.3, t1: 10.7 },
-];
-const FILES = [
-  ['interview.mp3',                  '4.2 MB', 'audio'],
-  ['interview.cleaned.mp3',          '4.4 MB', 'audio'],
-  ['interview.cleaned_aggressive.mp3','4.4 MB','audio'],
-  ['transcript.txt',                 '2 KB',   'doc'],
-  ['transcript.srt',                 '3 KB',   'doc'],
-  ['transcript.json',                '18 KB',  'doc'],
-  ['report.txt',                     '1 KB',   'doc'],
-];
+// transcript preview lines
 const LINES = [
   ['0:00', 'SPEAKER 1', true,  'So tell me how this project started.'],
   ['0:06', 'SPEAKER 2', false, 'It began as a side experiment last spring.'],
@@ -296,419 +351,364 @@ const LINES = [
   ['0:19', 'SPEAKER 2', false, 'The first prototype. It just worked.'],
 ];
 
-// mini waveform
-const mcols = [];
-{
-  const N = 110;
-  for (let i = 0; i < N; i++) {
-    const rnd = mulberry(5000 + i * 271);
-    const t = i / (N - 1);
-    const env = 0.35 + 0.65 * Math.abs(Math.sin(t*9.1)*0.55 + Math.sin(t*23.7)*0.3 + Math.sin(t*3.3)*0.35);
-    mcols.push({ t, env, dots: Array.from({length: 6}, () => ({ dy: (rnd()*2-1)*44*env, op: 0.16+rnd()*0.45, sz: 3+rnd()*3 })) });
-  }
-}
-const MTURNS = [[0.03,0.24,1],[0.28,0.42,0],[0.46,0.72,1],[0.76,0.88,0],[0.90,1.0,1]];
-function mturn(t){ for (const [a,b,sp] of MTURNS) if (t>=a&&t<=b) return sp; return -1; }
-
-function notification(s, a, b, title, body) {
+// screen-space notification
+function notification(c, s, a, b, title, body) {
   const tin = eoc(seg(s, a, a + 0.55));
   const tout = 1 - eic(seg(s, b - 0.4, b));
   const al = Math.min(tin, tout);
   if (al <= 0) return;
-  const w = L.notifW, h = 156;
+  const w = 700, h = 150;
   const x = W - 70 - w + (1 - tin) * (w + 110), y = 90;
-  ctx.save(); ctx.globalAlpha = al;
-  glass(x, y, w, h, 30, 1, { tint: 'rgba(22,22,30,0.42)' });
-  appTile(x + 28, y + 34, 88, 1);
-  ctx.fillStyle = TXT; ctx.font = F(600, 34); ctx.textBaseline = 'middle';
-  ctx.fillText(title, x + 144, y + 60);
-  ctx.fillStyle = SUB; ctx.font = F(400, 30);
-  ctx.fillText(body, x + 144, y + 108);
-  ctx.restore();
-}
-
-// ---- cinematic hero (title card): node-graph close-up with DOF ----
-const heroBg = document.createElement('canvas');
-heroBg.width = W; heroBg.height = H;
-const heroMid = document.createElement('canvas');
-heroMid.width = W; heroMid.height = H;
-(function buildHeroLayers() {
-  const b = heroBg.getContext('2d');
-  b.fillStyle = '#0B0B0F'; b.fillRect(0, 0, W, H);
-  // dot grid
-  b.fillStyle = 'rgba(255,255,255,0.10)';
-  for (let gy = 40; gy < H; gy += 88)
-    for (let gx = 40; gx < W; gx += 88) b.fillRect(gx, gy, 4, 4);
-  // far cards (very blurred later)
-  const card = (x, y, w, h, warm) => {
-    const g = b.createLinearGradient(x, y, x + w, y + h);
-    if (warm) { g.addColorStop(0, 'rgba(140,60,25,0.9)'); g.addColorStop(1, 'rgba(210,90,35,0.75)'); }
-    else { g.addColorStop(0, 'rgba(34,34,42,0.95)'); g.addColorStop(1, 'rgba(24,24,30,0.95)'); }
-    b.fillStyle = g;
-    b.beginPath(); b.roundRect(x, y, w, h, 40); b.fill();
-    b.strokeStyle = 'rgba(255,255,255,0.14)'; b.lineWidth = 2;
-    b.beginPath(); b.roundRect(x, y, w, h, 40); b.stroke();
-  };
-  card(-200, -160, 1250, 700, false);
-  card(W - 620, -80, 900, 1350, true);          // big warm card off right edge
-  card(-350, H - 700, 1000, 800, false);
-  const m = heroMid.getContext('2d');
-  // wires
-  m.strokeStyle = 'rgba(255,255,255,0.22)'; m.lineWidth = 3.5;
-  m.beginPath(); m.moveTo(-50, 640); m.bezierCurveTo(420, 500, 520, 1240, 230, 1560); m.stroke();
-  m.beginPath(); m.moveTo(150, 1860); m.bezierCurveTo(560, 1700, 420, 1620, 232, 1562); m.stroke();
-  m.beginPath(); m.moveTo(W - 300, 380); m.bezierCurveTo(W - 700, 500, W - 500, 820, W - 260, 900); m.stroke();
-  const port = (x, y, c, r) => {
-    m.save(); m.shadowColor = c; m.shadowBlur = 34;
-    m.fillStyle = c; m.beginPath(); m.arc(x, y, r, 0, 7); m.fill();
-    m.restore();
-  };
-  port(230, 1560, '#F2F2F5', 26);
-  port(W - 260, 900, '#E8863C', 24);
-  port(560, 300, '#F2F2F5', 22);
-})();
-
-function drawHero(alpha, timeS) {
-  if (alpha <= 0) return;
-  ctx.save();
-  ctx.globalAlpha = alpha;
-  // DOF layers
-  ctx.filter = 'blur(30px) brightness(0.9)';
-  ctx.drawImage(heroBg, 0, 0);
-  ctx.filter = 'blur(9px)';
-  ctx.drawImage(heroMid, 0, 0);
-  ctx.filter = 'none';
-  // warm ambient wash behind the focal card
-  const wash = ctx.createRadialGradient(W*0.56, H*0.46, 100, W*0.56, H*0.46, 1500);
-  wash.addColorStop(0, 'rgba(214,120,50,0.16)');
-  wash.addColorStop(0.6, 'rgba(180,90,40,0.05)');
-  wash.addColorStop(1, 'rgba(0,0,0,0)');
-  ctx.fillStyle = wash; ctx.fillRect(0, 0, W, H);
-
-  // ---- focal node card (tilted, slow push-in) ----
-  const push = 1.045 - 0.045 * Math.min(1, timeS / 1.0);
-  const ccx = W * 0.56, ccy = H * 0.45;
-  ctx.translate(ccx, ccy);
-  ctx.rotate(-0.115);
-  ctx.scale(push, push);
-  const cw = 1680, ch = 800, cx0 = -cw/2, cy0 = -ch/2;
-  // card body: warm amber glass
-  ctx.shadowColor = 'rgba(0,0,0,0.6)'; ctx.shadowBlur = 130; ctx.shadowOffsetY = 44;
-  const bodyG = ctx.createLinearGradient(cx0, cy0, cx0 + cw, cy0 + ch);
-  bodyG.addColorStop(0, 'rgba(122,58,30,0.96)');
-  bodyG.addColorStop(0.55, 'rgba(158,86,44,0.94)');
-  bodyG.addColorStop(1, 'rgba(206,144,84,0.90)');
-  ctx.fillStyle = bodyG;
-  ctx.beginPath(); ctx.roundRect(cx0, cy0, cw, ch, 56); ctx.fill();
-  ctx.shadowColor = 'transparent';
-  // sheen + border
-  const sheenG = ctx.createLinearGradient(0, cy0, 0, cy0 + ch * 0.5);
-  sheenG.addColorStop(0, 'rgba(255,255,255,0.16)');
-  sheenG.addColorStop(1, 'rgba(255,255,255,0)');
-  ctx.fillStyle = sheenG;
-  ctx.beginPath(); ctx.roundRect(cx0, cy0, cw, ch * 0.5, 56); ctx.fill();
-  const bord = ctx.createLinearGradient(0, cy0, 0, cy0 + ch);
-  bord.addColorStop(0, 'rgba(255,235,210,0.5)');
-  bord.addColorStop(1, 'rgba(255,235,210,0.10)');
-  ctx.strokeStyle = bord; ctx.lineWidth = 2.5;
-  ctx.beginPath(); ctx.roundRect(cx0 + 1, cy0 + 1, cw - 2, ch - 2, 56); ctx.stroke();
-  // header
-  ctx.fillStyle = 'rgba(255,240,220,0.75)';
-  ctx.beginPath(); ctx.arc(cx0 + 78, cy0 + 92, 13, 0, 7); ctx.fill();
-  ctx.fillStyle = '#FFF6EA'; ctx.font = `600 58px ${SANS}`; ctx.textBaseline = 'middle';
-  ctx.fillText('Label speakers', cx0 + 122, cy0 + 94);
-  const tw = ctx.measureText('Label speakers').width;
-  ctx.font = `400 40px ${MONO}`; ctx.fillStyle = 'rgba(255,240,220,0.55)';
-  ctx.fillText('pyannote', cx0 + 122 + tw + 46, cy0 + 98);
-  ctx.strokeStyle = 'rgba(255,245,230,0.28)'; ctx.lineWidth = 2;
-  ctx.beginPath(); ctx.moveTo(cx0 + 56, cy0 + 156); ctx.lineTo(cx0 + cw - 56, cy0 + 156); ctx.stroke();
-  // input ports
-  const portDot = (x, y, c) => {
-    ctx.save(); ctx.shadowColor = c; ctx.shadowBlur = 30;
-    ctx.fillStyle = c; ctx.beginPath(); ctx.arc(x, y, 27, 0, 7); ctx.fill();
-    ctx.restore();
-    ctx.strokeStyle = 'rgba(0,0,0,0.25)'; ctx.lineWidth = 2;
-    ctx.beginPath(); ctx.arc(x, y, 27, 0, 7); ctx.stroke();
-  };
-  portDot(cx0 + 6, cy0 + 300, '#F2F2F5');
-  ctx.fillStyle = '#FFF2E2'; ctx.font = `500 46px ${SANS}`;
-  ctx.fillText('cleaned', cx0 + 78, cy0 + 302);
-  portDot(cx0 + 6, cy0 + 432, '#E8863C');
-  ctx.fillText('original', cx0 + 78, cy0 + 434);
-  // output port
-  ctx.font = `500 44px ${SANS}`; ctx.fillStyle = 'rgba(255,246,234,0.92)';
-  const ow = ctx.measureText('TRANSCRIPT').width;
-  ctx.fillText('TRANSCRIPT', cx0 + cw - ow - 92, cy0 + 366);
-  portDot(cx0 + cw - 6, cy0 + 364, '#F2F2F5');
-  // labeled mini waveform inside the card
-  const wz = { x: cx0 + 84, w: cw - 168, y: cy0 + ch - 170 };
-  for (let i = 0; i < 90; i++) {
-    const t = i / 89;
-    const env = 0.35 + 0.65 * Math.abs(Math.sin(t*9.1)*0.55 + Math.sin(t*23.7)*0.3 + Math.sin(t*3.3)*0.35);
-    const sp = mturn(t);
-    const hh = sp < 0 ? 7 : 14 + env * 96;
-    ctx.fillStyle = sp < 0 ? 'rgba(40,22,12,0.5)' : (sp === 0 ? '#F5D9A8' : '#FFF6EA');
-    ctx.globalAlpha = alpha * (sp === 0 ? 1 : 0.9);
-    ctx.beginPath(); ctx.roundRect(wz.x + t * wz.w, wz.y - hh/2, 7, hh, 3.5); ctx.fill();
-  }
-  ctx.globalAlpha = alpha;
-  ctx.restore();
-
-  // ---- valet cursor + tag (sharp, unrotated) ----
-  ctx.save();
-  ctx.globalAlpha = alpha;
-  const cxr = W * 0.335, cyr = H * 0.635;
-  cursor(cxr, cyr, 1);
-  ctx.shadowColor = 'rgba(0,0,0,0.4)'; ctx.shadowBlur = 22; ctx.shadowOffsetY = 6;
-  ctx.fillStyle = '#FFFFFF';
-  ctx.font = `500 40px ${SANS}`;
-  const tagW = ctx.measureText('valet').width + 56;
-  ctx.beginPath(); ctx.roundRect(cxr + 30, cyr + 74, tagW, 74, 37); ctx.fill();
-  ctx.shadowColor = 'transparent';
-  ctx.fillStyle = '#1A1A20'; ctx.textBaseline = 'middle';
-  ctx.fillText('valet', cxr + 58, cyr + 113);
-  ctx.restore();
-
-  // ---- sharp brand block, bottom-left ----
-  ctx.save();
-  ctx.globalAlpha = alpha;
-  wordmark(SQ ? 150 : 220, H - 200, SQ ? 108 : 118, 1, 'left');
-  ctx.font = F(400, 42); ctx.fillStyle = '#9A9AA4';
-  ctx.fillText('The backstage crew for MacWhisper', (SQ ? 154 : 224), H - 128);
-  ctx.restore();
-
-  // vignette
-  ctx.save();
-  ctx.globalAlpha = alpha;
-  const hv = ctx.createRadialGradient(W/2, H/2, H*0.3, W/2, H/2, H*0.95);
-  hv.addColorStop(0, 'rgba(0,0,0,0)');
-  hv.addColorStop(1, 'rgba(0,0,0,0.42)');
-  ctx.fillStyle = hv; ctx.fillRect(0, 0, W, H);
-  ctx.restore();
+  c.save(); c.globalAlpha = al;
+  c.shadowColor = 'rgba(0,0,0,0.5)'; c.shadowBlur = 60; c.shadowOffsetY = 20;
+  c.fillStyle = 'rgba(24,24,32,0.9)';
+  rr(c, x, y, w, h, 30); c.fill();
+  c.shadowColor = 'transparent';
+  const bg = c.createLinearGradient(0, y, 0, y + h);
+  bg.addColorStop(0, 'rgba(255,255,255,0.24)');
+  bg.addColorStop(1, 'rgba(255,255,255,0.06)');
+  c.strokeStyle = bg; c.lineWidth = 2;
+  rr(c, x+1, y+1, w-2, h-2, 30); c.stroke();
+  appTileC(c, x + 28, y + 33, 84, 1);
+  c.fillStyle = TXT; c.font = F(600, 33); c.textBaseline = 'middle';
+  c.fillText(title, x + 140, y + 58);
+  c.fillStyle = SUB; c.font = F(400, 29);
+  c.fillText(body, x + 140, y + 104);
+  c.restore();
 }
 
 // ============================================================
 window.renderFrame = function(frame) {
-  const realS = frame / FPS;
-  const s = realS - SHIFT;
+  const s = frame / FPS;
 
-  // ---- ambient stage ----
-  paintOrbs(realS);
+  // ---- backdrop ----
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
   ctx.globalAlpha = 1;
   ctx.imageSmoothingEnabled = true;
   ctx.imageSmoothingQuality = 'high';
   ctx.drawImage(orbCanvas, 0, 0, W, H);
-  const vg = ctx.createRadialGradient(W/2, H/2, 300, W/2, H/2, Math.max(W, H));
-  vg.addColorStop(0, 'rgba(0,0,0,0)');
-  vg.addColorStop(1, 'rgba(0,0,0,0.4)');
-  ctx.fillStyle = vg; ctx.fillRect(0, 0, W, H);
 
-  const { win, twin } = L;
-  const winIn = eoc(seg(s, 0.1, 0.75));
-  const endDim = 1 - 0.85 * eoc(seg(s, 17.4, 18.0));   // windows recede for the close
-  const wy = win.y + (1 - winIn) * 50;
+  // ---- camera ----
+  const cam = camera(s);
+  ctx.save();
+  ctx.translate(W/2, H/2);
+  ctx.scale(cam.z, cam.z);
+  ctx.rotate(TILT);
+  ctx.translate(-cam.cx, -cam.cy);
 
-  // ---- main window ----
-  if (winIn > 0) {
-    glass(win.x, wy, win.w, win.h, win.r, winIn * endDim);
-    trafficLights(win.x + 52, wy + 46, winIn * endDim);
-    ctx.save(); ctx.globalAlpha = winIn * endDim;
-    ctx.fillStyle = TXT; ctx.font = F(600, 36); ctx.textBaseline = 'middle';
-    ctx.fillText('AudioDrop', win.x + 200, wy + 48);
-    ctx.fillStyle = DIM; ctx.font = F(400, 27, true);
-    const pw = ctx.measureText('~/AudioDrop').width;
-    ctx.fillText('~/AudioDrop', win.x + win.w - pw - 48, wy + 48);
-    ctx.strokeStyle = 'rgba(255,255,255,0.09)'; ctx.lineWidth = 1.5;
-    ctx.beginPath(); ctx.moveTo(win.x + 24, wy + 94); ctx.lineTo(win.x + win.w - 24, wy + 94); ctx.stroke();
+  // dot grid (canvas space)
+  ctx.fillStyle = 'rgba(255,255,255,0.07)';
+  for (let gy = 0; gy < 3000; gy += 96)
+    for (let gx = 0; gx < 3600; gx += 96) ctx.fillRect(gx, gy, 4, 4);
+
+  // ---- source node appears on drop; others always present ----
+  const srcIn = eoc(seg(s, 2.2, 2.55));
+  const dropDone = s >= 2.25;
+
+  // ---- wires ----
+  for (const wr of WIRES) {
+    if ((wr.a === P.srcOut) && !dropDone) continue;
+    const pts = bez(wr);
+    const [t0, t1] = wr.st === 'final' ? [11.0, 99] : SCHED[wr.st];
+    const active = s >= t0 && s <= t1 + 0.3;
+    const done = s > t1 + 0.3;
+    ctx.strokeStyle = active ? 'rgba(212,183,126,0.65)' : (done ? 'rgba(255,255,255,0.30)' : 'rgba(255,255,255,0.16)');
+    ctx.lineWidth = active ? 4.5 : 3;
+    if (active) { ctx.shadowColor = 'rgba(201,169,106,0.5)'; ctx.shadowBlur = 16; }
+    ctx.beginPath();
+    ctx.moveTo(pts[0], pts[1]);
+    ctx.bezierCurveTo(pts[2], pts[3], pts[4], pts[5], pts[6], pts[7]);
+    ctx.stroke();
+    ctx.shadowColor = 'transparent';
+    // pulses along active wires
+    if (active) {
+      for (let k = 0; k < 3; k++) {
+        const u = ((s * 0.55 + k * 0.333) % 1);
+        const p = bezPoint(pts, u);
+        ctx.save();
+        ctx.shadowColor = '#FFD9A0'; ctx.shadowBlur = 26;
+        ctx.fillStyle = '#FFE9C4';
+        ctx.beginPath(); ctx.arc(p.x, p.y, 11, 0, 7); ctx.fill();
+        ctx.restore();
+      }
+    }
+  }
+
+  // ---- nodes ----
+  const nodeState = (key) => {
+    if (!(key in SCHED)) return 0;
+    const [t0, t1] = SCHED[key];
+    if (s < t0) return 0;
+    if (s <= t1) return 1;
+    return 2;
+  };
+
+  // source node (materializes on drop)
+  if (srcIn > 0) {
+    const n = N.src;
+    ctx.save();
+    const cx0 = n.x + n.w/2, cy0 = n.y + n.h/2;
+    ctx.translate(cx0, cy0); ctx.scale(0.94 + 0.06 * srcIn, 0.94 + 0.06 * srcIn); ctx.translate(-cx0, -cy0);
+    nodeGlass(ctx, n, srcIn, dropDone ? 2 : 0);
+    nodeHeader(ctx, n, srcIn, 2, 1);
+    audioIconC(ctx, n.x + 52, n.y + 150, 60, GOLD_T, srcIn);
+    ctx.globalAlpha = srcIn;
+    ctx.fillStyle = SUB; ctx.font = F(400, 30);
+    ctx.textBaseline = 'middle';
+    ctx.fillText('3 min 12 s', n.x + 150, n.y + 182);
+    // tiny waveform
+    for (let i = 0; i < 40; i++) {
+      const t = i / 39;
+      const env = envelope(t);
+      const hh = 10 + env * 52;
+      ctx.fillStyle = 'rgba(255,255,255,0.5)';
+      rr(ctx, n.x + 52 + t * (n.w - 110), n.y + 262 - hh/2, 5, hh, 2.5); ctx.fill();
+    }
+    portLabel(ctx, P.srcOut, 'audio', 'r', srcIn, false);
+    ctx.restore();
+    portDot(ctx, P.srcOut, srcIn, s >= 3.4 && s <= 11.0);
+  } else {
+    // ghost target before drop
+    const n = N.src;
+    ctx.save();
+    ctx.globalAlpha = 0.8;
+    ctx.setLineDash([16, 14]);
+    ctx.strokeStyle = 'rgba(255,255,255,0.28)'; ctx.lineWidth = 3;
+    rr(ctx, n.x, n.y, n.w, n.h, 34); ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.fillStyle = 'rgba(255,255,255,0.4)'; ctx.font = F(400, 34);
+    ctx.textBaseline = 'middle';
+    const m = 'Drop audio here';
+    ctx.fillText(m, n.x + (n.w - ctx.measureText(m).width)/2, n.y + n.h/2);
     ctx.restore();
   }
-  const cy0 = wy + 94;
-  const showResults = s >= 12.0;
-  const procIn = seg(s, 2.7, 3.3);
 
-  // ---- empty state ----
-  const emptyOut = 1 - eic(seg(s, 2.0, 2.4));
-  if (emptyOut > 0 && !showResults && procIn < 1) {
-    ctx.save(); ctx.globalAlpha = winIn * emptyOut * (1 - procIn) * endDim;
-    ctx.fillStyle = FAINT; ctx.font = F(400, 42);
-    const msg = 'Drop audio here';
-    ctx.fillText(msg, win.x + (win.w - ctx.measureText(msg).width)/2, cy0 + win.h * 0.42);
-    ctx.strokeStyle = 'rgba(255,255,255,0.13)'; ctx.setLineDash([16, 16]); ctx.lineWidth = 2.5;
-    rr(win.x + 110, cy0 + win.h * 0.24, win.w - 220, win.h * 0.34, 24);
-    ctx.stroke(); ctx.setLineDash([]);
+  // demucs node
+  {
+    const n = N.demucs, st = nodeState('demucs');
+    nodeGlass(ctx, n, 1, st);
+    nodeHeader(ctx, n, 1, st, seg(s, SCHED.demucs[1], SCHED.demucs[1] + 0.4));
+    portDot(ctx, P.demucsIn, 1, st === 1);
+    portLabel(ctx, P.demucsIn, 'audio', 'l', 1, false);
+    portDot(ctx, P.demucsOut, 1, st === 1);
+    portLabel(ctx, P.demucsOut, 'cleaned', 'r', 1, false);
+    ctx.save(); ctx.globalAlpha = 1;
+    ctx.fillStyle = 'rgba(255,255,255,0.06)';
+    rr(ctx, n.x + 44, n.y + 240, n.w - 88, 74, 16); ctx.fill();
+    ctx.fillStyle = SUB; ctx.font = F(400, 28, true); ctx.textBaseline = 'middle';
+    ctx.fillText('two_stems', n.x + 74, n.y + 278);
+    const vw = ctx.measureText('vocals').width;
+    ctx.fillStyle = '#D6D6DE';
+    ctx.fillText('vocals', n.x + n.w - 74 - vw, n.y + 278);
+    if (st === 1) {
+      const pp = seg(s, SCHED.demucs[0], SCHED.demucs[1]);
+      ctx.fillStyle = 'rgba(255,255,255,0.10)';
+      rr(ctx, n.x + 44, n.y + 150, n.w - 88, 5, 2.5); ctx.fill();
+      ctx.fillStyle = GOLD;
+      rr(ctx, n.x + 44, n.y + 150, (n.w - 88) * pp, 5, 2.5); ctx.fill();
+    }
     ctx.restore();
   }
+  // loudnorm node
+  {
+    const n = N.loudnorm, st = nodeState('loudnorm');
+    nodeGlass(ctx, n, 1, st);
+    nodeHeader(ctx, n, 1, st, seg(s, SCHED.loudnorm[1], SCHED.loudnorm[1] + 0.4));
+    portDot(ctx, P.loudIn, 1, st === 1);
+    portLabel(ctx, P.loudIn, 'cleaned', 'l', 1, false);
+    portDot(ctx, P.loudOut, 1, st === 1);
+    portLabel(ctx, P.loudOut, 'leveled', 'r', 1, false);
+    if (st === 1) {
+      const pp = seg(s, SCHED.loudnorm[0], SCHED.loudnorm[1]);
+      ctx.fillStyle = 'rgba(255,255,255,0.10)';
+      rr(ctx, n.x + 44, n.y + 220, n.w - 88, 5, 2.5); ctx.fill();
+      ctx.fillStyle = GOLD;
+      rr(ctx, n.x + 44, n.y + 220, (n.w - 88) * pp, 5, 2.5); ctx.fill();
+    }
+  }
+  // whisper node with param rows
+  {
+    const n = N.whisper, st = nodeState('whisper');
+    nodeGlass(ctx, n, 1, st);
+    nodeHeader(ctx, n, 1, st, seg(s, SCHED.whisper[1], SCHED.whisper[1] + 0.4));
+    portDot(ctx, P.whisperIn, 1, st === 1);
+    portLabel(ctx, P.whisperIn, 'audio', 'l', 1, false);
+    portDot(ctx, P.whisperOut, 1, st === 1);
+    portLabel(ctx, P.whisperOut, 'WORDS', 'r', 1, false);
+    const rows = [['model', 'large-v3-turbo'], ['format', 'json'], ['timestamps', 'word']];
+    rows.forEach((rw, i) => {
+      const ry = n.y + 250 + i * 88;
+      ctx.fillStyle = 'rgba(255,255,255,0.06)';
+      rr(ctx, n.x + 44, ry, n.w - 88, 70, 16); ctx.fill();
+      ctx.fillStyle = SUB; ctx.font = F(400, 27, true); ctx.textBaseline = 'middle';
+      ctx.fillText(rw[0], n.x + 74, ry + 36);
+      const vw = ctx.measureText(rw[1]).width;
+      ctx.fillStyle = '#D6D6DE';
+      ctx.fillText(rw[1], n.x + n.w - 74 - vw, ry + 36);
+    });
+    if (st === 1) {
+      const pp = seg(s, SCHED.whisper[0], SCHED.whisper[1]);
+      ctx.fillStyle = 'rgba(255,255,255,0.10)';
+      rr(ctx, n.x + 44, n.y + 160, n.w - 88, 5, 2.5); ctx.fill();
+      ctx.fillStyle = GOLD;
+      rr(ctx, n.x + 44, n.y + 160, (n.w - 88) * pp, 5, 2.5); ctx.fill();
+    }
+  }
+  // pyannote node (amber hero)
+  {
+    const n = N.pyannote, st = nodeState('pyannote');
+    nodeGlass(ctx, n, 1, st);
+    nodeHeader(ctx, n, 1, st, seg(s, SCHED.pyannote[1], SCHED.pyannote[1] + 0.4));
+    portDot(ctx, P.pyCleaned, 1, st === 1);
+    portLabel(ctx, P.pyCleaned, 'cleaned', 'l', 1, true);
+    portDot(ctx, P.pyOriginal, 1, st === 1);
+    portLabel(ctx, P.pyOriginal, 'original', 'l', 1, true);
+    portDot(ctx, P.pyOut, 1, st >= 1);
+    ctx.save(); ctx.globalAlpha = 1;
+    ctx.font = F(500, 32); ctx.fillStyle = 'rgba(255,246,234,0.92)';
+    ctx.textBaseline = 'middle';
+    const ow = ctx.measureText('TRANSCRIPT').width;
+    ctx.fillText('TRANSCRIPT', P.pyOut.x - 58 - ow, P.pyOut.y + 1);
+    // waveform: neutral -> speaker colors as labeling completes
+    const colorP = eoc(seg(s, 10.2, 10.9));
+    for (let i = 0; i < 80; i++) {
+      const t = i / 79;
+      const env = envelope(t);
+      const sp = mturn(t);
+      const hh = sp < 0 ? 6 : 12 + env * 88;
+      let fill = 'rgba(255,246,234,0.9)';
+      if (sp < 0) fill = 'rgba(40,22,12,0.5)';
+      else if (sp === 0 && colorP > 0) fill = '#F5D9A8';
+      ctx.fillStyle = fill;
+      rr(ctx, n.x + 250 + t * (n.w - 320), n.y + n.h - 105 - hh/2, 6, hh, 3); ctx.fill();
+    }
+    ctx.restore();
+  }
+  // preview node: transcript fills in
+  {
+    const n = N.preview;
+    const st = s >= 11.0 ? (s >= 16.6 ? 2 : 1) : 0;
+    nodeGlass(ctx, n, 1, st === 1 ? 1 : (st === 2 ? 2 : 0));
+    nodeHeader(ctx, n, 1, st, seg(s, 16.6, 17.0));
+    portDot(ctx, P.prevWords, 1, st === 1);
+    portLabel(ctx, P.prevWords, 'words', 'l', 1, false);
+    portDot(ctx, P.prevSpk, 1, st === 1);
+    portLabel(ctx, P.prevSpk, 'speakers', 'l', 1, false);
+    LINES.forEach((ln, i) => {
+      const la = eoc(seg(s, 13.8 + i * 0.55, 14.25 + i * 0.55));
+      if (la <= 0) return;
+      const ly = n.y + 210 + i * 160 + (1 - la) * 14;
+      ctx.save(); ctx.globalAlpha = la;
+      ctx.fillStyle = DIM; ctx.font = F(400, 24, true); ctx.textBaseline = 'middle';
+      ctx.fillText(ln[0], n.x + 56, ly);
+      chipC(ctx, ln[1], n.x + 150, ly, ln[2], la, 1);
+      ctx.fillStyle = '#CDCED6'; ctx.font = F(400, 29);
+      ctx.fillText(ln[3], n.x + 56, ly + 62);
+      ctx.restore();
+    });
+    const fa = eoc(seg(s, 16.4, 16.9));
+    if (fa > 0) {
+      ctx.save(); ctx.globalAlpha = fa;
+      ctx.fillStyle = DIM; ctx.font = F(400, 24, true); ctx.textBaseline = 'middle';
+      ctx.fillText('report.txt: all segments confident', n.x + 56, n.y + n.h - 64);
+      ctx.restore();
+    }
+  }
 
-  // ---- drag: bezier arc, chip scales up slightly on pickup ----
-  const dragP = seg(s, 0.9, 2.3);
+  // ---- drag: cursor carries the file chip onto the ghost node ----
+  const dragP = seg(s, 1.15, 2.25);
   if (dragP > 0 && s < 2.25) {
     const e = eio(dragP);
-    const [sx, sy] = L.cursorStart;
-    const ex = win.x + win.w/2, ey = cy0 + win.h * 0.40;
-    const mx = (sx + ex) / 2 - 260, my = Math.min(sy, ey) - 420;   // control point: arc up-left
-    const bez = (a, b, c, t) => (1-t)*(1-t)*a + 2*(1-t)*t*b + t*t*c;
-    const cxp = bez(sx, mx, ex, e), cyp = bez(sy, my, ey, e);
-    const scale = 1 + 0.04 * Math.sin(Math.PI * Math.min(1, e * 1.15));
-    const chw = 470 * scale, chh = 94 * scale;
-    glass(cxp - chw/2, cyp - chh/2, chw, chh, 22, 0.98, { tint: 'rgba(24,24,32,0.4)' });
-    audioIcon(cxp - chw/2 + 32, cyp - 27, 54, GOLD_T, 1);
-    ctx.fillStyle = TXT; ctx.font = F(500, 33, true); ctx.textBaseline = 'middle';
-    ctx.fillText('interview.mp3', cxp - chw/2 + 130, cyp + 1);
-    cursor(cxp + 135, cyp + 22, 1);
+    const sx = 60, sy = 1900, exx = N.src.x + N.src.w/2, eyy = N.src.y + N.src.h/2;
+    const mxx = (sx + exx)/2 - 200, myy = Math.min(sy, eyy) - 380;
+    const b2 = (a, b, c2, t) => (1-t)*(1-t)*a + 2*(1-t)*t*b + t*t*c2;
+    const cxp = b2(sx, mxx, exx, e), cyp = b2(sy, myy, eyy, e);
+    // chip
+    ctx.save();
+    ctx.shadowColor = 'rgba(0,0,0,0.5)'; ctx.shadowBlur = 40; ctx.shadowOffsetY = 14;
+    ctx.fillStyle = 'rgba(30,30,40,0.92)';
+    rr(ctx, cxp - 200, cyp - 44, 400, 88, 20); ctx.fill();
+    ctx.shadowColor = 'transparent';
+    ctx.strokeStyle = 'rgba(255,255,255,0.22)'; ctx.lineWidth = 2;
+    rr(ctx, cxp - 200, cyp - 44, 400, 88, 20); ctx.stroke();
+    audioIconC(ctx, cxp - 170, cyp - 24, 46, GOLD_T, 1);
+    ctx.fillStyle = TXT; ctx.font = F(500, 30, true); ctx.textBaseline = 'middle';
+    ctx.fillText('interview.mp3', cxp - 100, cyp + 1);
+    ctx.restore();
+    cursorC(ctx, cxp + 120, cyp + 20, 1, 1.15);
+    tagC(ctx, cxp + 150, cyp + 78, 'valet', 1);
   }
-  const exitP = seg(s, 2.25, 2.95);
-  if (exitP > 0 && exitP < 1) {
-    const e = eic(exitP);
-    cursor(win.x + win.w/2 + 135 + e * 1300, cy0 + win.h * 0.40 + e * 800, 1 - e);
+  // idle cursor near preview at the end
+  const idleA = seg(s, 14.2, 14.8);
+  if (idleA > 0 && s < 17.4) {
+    const nx = N.preview.x - 120 + 40 * Math.sin(s * 0.7);
+    const ny = N.preview.y + 700 + 26 * Math.cos(s * 0.5);
+    cursorC(ctx, nx, ny, eoc(idleA), 1.1);
+    tagC(ctx, nx + 34, ny + 60, 'valet', eoc(idleA));
   }
 
-  // ---- processing ----
-  if (!showResults && procIn > 0) {
-    const a = eoc(procIn) * winIn * endDim;
-    ctx.save(); ctx.globalAlpha = a;
-    const frY = cy0 + 44;
-    glassRow(win.x + 48, frY, win.w - 96, L.rowH + 8, 20, 1, false);
-    audioIcon(win.x + 88, frY + (L.rowH + 8 - 56)/2, 56, GOLD_T, 1);
-    ctx.fillStyle = TXT; ctx.font = F(500, 34, true); ctx.textBaseline = 'middle';
-    ctx.fillText('interview.mp3', win.x + 180, frY + (L.rowH + 8)/2);
-    ctx.fillStyle = SUB; ctx.font = F(400, 28);
-    const dw = ctx.measureText('3 min 12 s').width;
-    ctx.fillText('3 min 12 s', win.x + win.w - dw - 84, frY + (L.rowH + 8)/2);
-    STAGES.forEach((st, i) => {
-      const ry = frY + 170 + i * L.stagePitch;
-      const started = s >= st.t0, done = s >= st.t1;
-      const doneP = seg(s, st.t1, st.t1 + 0.4);
-      ctx.globalAlpha = a * (started ? 1 : 0.4);
-      const gx = win.x + 116, gy = ry + 26;
-      if (done) check(gx, gy, 34, doneP, 1);
-      else if (started) spinner(gx, gy, 22, realS, 1);
-      else { ctx.strokeStyle = FAINT; ctx.lineWidth = 4; ctx.beginPath(); ctx.arc(gx, gy, 20, 0, 7); ctx.stroke(); }
-      ctx.fillStyle = started ? TXT : SUB; ctx.font = F(500, 37); ctx.textBaseline = 'middle';
-      ctx.fillText(st.name, win.x + 188, ry + 26);
-      ctx.fillStyle = DIM; ctx.font = F(400, 27, true);
-      ctx.fillText(st.tool, win.x + 188 + 470, ry + 28);
-      if (started && !done) {
-        const pp = seg(s, st.t0, st.t1);
-        ctx.fillStyle = 'rgba(255,255,255,0.10)';
-        rr(win.x + 188, ry + 64, win.w - 470, 5, 2.5); ctx.fill();
-        const pg = ctx.createLinearGradient(win.x + 188, 0, win.x + 188 + (win.w - 470) * pp, 0);
-        pg.addColorStop(0, 'rgba(201,169,106,0.5)');
-        pg.addColorStop(1, GOLD);
-        ctx.fillStyle = pg;
-        rr(win.x + 188, ry + 64, (win.w - 470) * pp, 5, 2.5); ctx.fill();
-      }
-    });
-    // mini waveform
-    const resolveP = seg(s, 4.6, 7.7);
-    const colorP = eoc(seg(s, 10.3, 10.9));
-    const mzx = win.x + 110, mzw = win.w - 220, mzy = wy + L.miniY;
-    for (const c of mcols) {
-      const mx = mzx + c.t * mzw;
-      const res = eoc(cl((resolveP * 1.25 - c.t) / 0.12));
-      if (res < 1) {
-        for (const d of c.dots) {
-          ctx.globalAlpha = a * d.op * (1 - res);
-          ctx.fillStyle = '#9494A0';
-          ctx.fillRect(mx, mzy + d.dy, d.sz, d.sz);
-        }
-      }
-      if (res > 0) {
-        const sp = mturn(c.t);
-        const hh = sp < 0 ? 5 : (10 + c.env * 62);
-        let fill = LIGHT, op = 0.85;
-        if (sp < 0) { fill = '#4A4A55'; op = 0.8; }
-        else if (sp === 0) { fill = colorP > 0 ? GOLD : LIGHT; op = 0.92; }
-        ctx.globalAlpha = a * op * res;
-        ctx.fillStyle = fill;
-        rr(mx, mzy + 20 - hh/2, 5, hh, 2.5); ctx.fill();
-      }
-    }
+  ctx.restore();   // end camera
+
+  // ---- DOF: blurred copy at the edges ----
+  dofCtx.clearRect(0, 0, W, H);
+  dofCtx.filter = 'blur(14px)';
+  dofCtx.drawImage(cnv, 0, 0);
+  dofCtx.filter = 'none';
+  dofCtx.globalCompositeOperation = 'destination-in';
+  dofCtx.drawImage(dofMask, 0, 0);
+  dofCtx.globalCompositeOperation = 'source-over';
+  ctx.drawImage(dofTmp, 0, 0);
+
+  // warm wash + vignette (screen space)
+  const wash = ctx.createRadialGradient(W*0.62, H*0.42, 100, W*0.62, H*0.42, 1600);
+  wash.addColorStop(0, 'rgba(214,120,50,0.10)');
+  wash.addColorStop(0.6, 'rgba(180,90,40,0.03)');
+  wash.addColorStop(1, 'rgba(0,0,0,0)');
+  ctx.fillStyle = wash; ctx.fillRect(0, 0, W, H);
+  const vg = ctx.createRadialGradient(W/2, H/2, H*0.3, W/2, H/2, H*0.95);
+  vg.addColorStop(0, 'rgba(0,0,0,0)');
+  vg.addColorStop(1, 'rgba(0,0,0,0.45)');
+  ctx.fillStyle = vg; ctx.fillRect(0, 0, W, H);
+
+  // ---- screen-space UI ----
+  notification(ctx, s, 2.7, 5.1, 'Whisper Valet', 'interview: processing started');
+  notification(ctx, s, 11.1, 13.4, 'Whisper Valet', 'interview: transcript ready');
+
+  // brand block: hero opening + closing
+  const brandA = Math.max(1 - eic(seg(s, 1.0, 1.6)), eoc(seg(s, 17.8, 18.4)));
+  if (brandA > 0) {
+    wordmarkC(ctx, 150, H - 200, 108, brandA, 'left');
+    ctx.save(); ctx.globalAlpha = brandA;
+    ctx.font = F(400, 40); ctx.fillStyle = '#9A9AA4';
+    ctx.textBaseline = 'alphabetic';
+    ctx.fillText('The backstage crew for MacWhisper', 154, H - 128);
     ctx.restore();
   }
-
-  // ---- results ----
-  if (showResults) {
-    const a = eoc(seg(s, 12.0, 12.6)) * winIn * endDim;
-    ctx.save(); ctx.globalAlpha = a;
-    ctx.fillStyle = SUB; ctx.font = F(400, 28, true); ctx.textBaseline = 'middle';
-    ctx.fillText('Processed / interview /', win.x + 56, cy0 + 46);
-    FILES.forEach((f, i) => {
-      const rowIn = eoc(seg(s, 12.15 + i * 0.08, 12.6 + i * 0.08));
-      if (rowIn <= 0) return;
-      const ry = cy0 + 90 + i * L.rowPitch + (1 - rowIn) * 18;
-      ctx.globalAlpha = a * rowIn;
-      const hot = f[0] === 'transcript.txt';
-      glassRow(win.x + 48, ry, win.w - 96, L.rowH, 20, 1, hot);
-      if (f[2] === 'audio') audioIcon(win.x + 88, ry + (L.rowH - 52)/2, 52, hot ? GOLD_T : '#B2B2BE', 1);
-      else docIcon(win.x + 92, ry + (L.rowH - 56)/2, 56, hot ? GOLD_T : '#B2B2BE', 1);
-      ctx.fillStyle = TXT; ctx.font = F(500, 33, true); ctx.textBaseline = 'middle';
-      ctx.fillText(f[0], win.x + 180, ry + L.rowH/2);
-      ctx.fillStyle = DIM; ctx.font = F(400, 27, true);
-      const sw = ctx.measureText(f[1]).width;
-      ctx.fillText(f[1], win.x + win.w - sw - 84, ry + L.rowH/2);
-    });
-    ctx.restore();
-  }
-
-  // ---- notifications ----
-  notification(s, 2.6, 5.2, 'Whisper Valet', 'interview: processing started');
-  notification(s, 10.9, 13.3, 'Whisper Valet', 'interview: transcript ready');
-
-  // ---- transcript window (rises from below) ----
-  const twIn = eoc(seg(s, 13.3, 14.0));
-  if (twIn > 0) {
-    const ty = twin.y + (1 - twIn) * 90;
-    const ta = twIn * endDim;
-    glass(twin.x, ty, twin.w, twin.h, twin.r, ta, { tint: 'rgba(14,14,20,0.62)' });
-    trafficLights(twin.x + 52, ty + 46, ta);
-    ctx.save(); ctx.globalAlpha = ta;
-    ctx.fillStyle = TXT; ctx.font = F(600, 33, true); ctx.textBaseline = 'middle';
-    ctx.fillText('transcript.txt', twin.x + 200, ty + 48);
-    ctx.strokeStyle = 'rgba(255,255,255,0.09)'; ctx.lineWidth = 1.5;
-    ctx.beginPath(); ctx.moveTo(twin.x + 24, ty + 94); ctx.lineTo(twin.x + twin.w - 24, ty + 94); ctx.stroke();
-    LINES.forEach((ln, i) => {
-      const la = eoc(seg(s, 14.1 + i * 0.55, 14.55 + i * 0.55));
-      if (la <= 0) return;
-      const ly = ty + 190 + i * 196 + (1 - la) * 16;
-      ctx.globalAlpha = ta * la;
-      ctx.fillStyle = DIM; ctx.font = F(400, 27, true);
-      ctx.fillText(ln[0], twin.x + 64, ly);
-      chipLabel(ln[1], twin.x + 296, ly, ln[2], 1, 1);
-      ctx.fillStyle = '#CDCED6'; ctx.font = F(400, 34);
-      ctx.fillText(ln[3], twin.x + 64, ly + 72);
-    });
-    const fa = eoc(seg(s, 16.5, 17.0));
-    if (fa > 0) {
-      ctx.globalAlpha = ta * fa;
-      ctx.fillStyle = DIM; ctx.font = F(400, 27, true);
-      ctx.fillText('report.txt: all segments confident, none flagged', twin.x + 64, ty + twin.h - 70);
-    }
-    ctx.restore();
-  }
-
-  // ---- closing lockup (echoes the opening) ----
-  const endIn = eoc(seg(s, 17.7, 18.4));
+  // closing: frost the whole frame, then the lockup on top
+  const endIn = eoc(seg(s, 17.8, 18.5));
   if (endIn > 0) {
+    dofCtx.clearRect(0, 0, W, H);
+    dofCtx.filter = `blur(${Math.round(22 * endIn)}px)`;
+    dofCtx.drawImage(cnv, 0, 0);
+    dofCtx.filter = 'none';
+    ctx.globalAlpha = endIn;
+    ctx.drawImage(dofTmp, 0, 0);
+    ctx.globalAlpha = 1;
+    ctx.fillStyle = `rgba(8,8,11,${0.80 * endIn})`;
+    ctx.fillRect(0, 0, W, H);
     const rise = (1 - endIn) * 26;
-    appTile(W/2 - 80, H/2 - 300 + rise, 160, endIn);
-    wordmark(W/2, H/2 + 20 + rise, SQ ? 140 : 150, endIn, 'center');
+    appTileC(ctx, W/2 - 80, H/2 - 250 + rise, 160, endIn);
+    wordmarkC(ctx, W/2, H/2 + 90 + rise, 140, endIn, 'center');
     ctx.save(); ctx.globalAlpha = endIn;
-    ctx.font = F(400, 46); ctx.fillStyle = '#8A8A94';
+    ctx.font = F(400, 44); ctx.fillStyle = '#9A9AA4';
+    ctx.textBaseline = 'alphabetic';
     const tg = 'The backstage crew for MacWhisper';
-    ctx.fillText(tg, (W - ctx.measureText(tg).width)/2, H/2 + 118 + rise);
-    ctx.font = F(400, 34, true); ctx.fillStyle = DIM;
+    ctx.fillText(tg, (W - ctx.measureText(tg).width)/2, H/2 + 190 + rise);
+    ctx.font = F(400, 33, true); ctx.fillStyle = DIM;
     const url = 'github.com/yashkotha/whisper-valet';
-    ctx.fillText(url, (W - ctx.measureText(url).width)/2, H/2 + 196 + rise);
+    ctx.fillText(url, (W - ctx.measureText(url).width)/2, H/2 + 262 + rise);
     ctx.restore();
   }
-
-  // ---- opening title card (frame 0 = thumbnail): cinematic hero ----
-  if (realS < SHIFT) {
-    const out = 1 - eic(seg(realS, SHIFT - 0.45, SHIFT - 0.05));
-    drawHero(Math.min(1, out), realS);
-  }
-
-  // ---- grain ----
   return true;
 };
 
